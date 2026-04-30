@@ -30,6 +30,27 @@ describe("env-loader", () => {
     expect(env).toEqual({ LINEAR_API_KEY: "lk", ANTHROPIC_API_KEY: "ak" });
   });
 
+  test("CLAUDE_CODE_OAUTH_TOKEN satisfies the auth requirement in place of ANTHROPIC_API_KEY", () => {
+    writeEnv("LINEAR_API_KEY=lk\nCLAUDE_CODE_OAUTH_TOKEN=tok\n");
+    const env = loadEnv({ repoRoot });
+    expect(env).toEqual({
+      LINEAR_API_KEY: "lk",
+      CLAUDE_CODE_OAUTH_TOKEN: "tok",
+    });
+  });
+
+  test("both auth keys + LINEAR_API_KEY all pass through", () => {
+    writeEnv(
+      "LINEAR_API_KEY=lk\nANTHROPIC_API_KEY=ak\nCLAUDE_CODE_OAUTH_TOKEN=tok\n"
+    );
+    const env = loadEnv({ repoRoot });
+    expect(env).toEqual({
+      LINEAR_API_KEY: "lk",
+      ANTHROPIC_API_KEY: "ak",
+      CLAUDE_CODE_OAUTH_TOKEN: "tok",
+    });
+  });
+
   test("file missing yields a clear error naming the path", () => {
     expect(() => loadEnv({ repoRoot })).toThrow(/env file not found/);
     expect(() => loadEnv({ repoRoot })).toThrow(/\.tide\/\.env/);
@@ -49,7 +70,7 @@ describe("env-loader", () => {
     expect(msg).toContain("LINEAR_API_KEY");
   });
 
-  test("file present but missing ANTHROPIC_API_KEY yields an error naming the missing key", () => {
+  test("file present but missing both auth keys yields an error naming both alternatives", () => {
     writeEnv("LINEAR_API_KEY=lk\n");
     let err: unknown = null;
     try {
@@ -58,7 +79,25 @@ describe("env-loader", () => {
       err = e;
     }
     expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain("ANTHROPIC_API_KEY");
+    const msg = (err as Error).message;
+    expect(msg).toContain(
+      "must define ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+    );
+  });
+
+  test("file present but empty yields a combined error naming all three keys", () => {
+    writeEnv("");
+    let err: unknown = null;
+    try {
+      loadEnv({ repoRoot });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    expect(msg).toContain("LINEAR_API_KEY");
+    expect(msg).toContain("ANTHROPIC_API_KEY");
+    expect(msg).toContain("CLAUDE_CODE_OAUTH_TOKEN");
   });
 
   test("malformed lines yield a parse error with line context", () => {

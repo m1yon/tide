@@ -83,7 +83,7 @@ describe("tide init", () => {
     expect(prompt).toContain("{{BRANCH}}");
   });
 
-  test(".env.example documents both universal required keys", () => {
+  test(".env.example documents the required key plus both auth alternatives", () => {
     init({ repoRoot, stdout: captureStdout, stderr: captureStderr });
     const envExample = readFileSync(
       join(repoRoot, ".tide", ".env.example"),
@@ -91,6 +91,8 @@ describe("tide init", () => {
     );
     expect(envExample).toContain("LINEAR_API_KEY");
     expect(envExample).toContain("ANTHROPIC_API_KEY");
+    expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(envExample).toContain("Set ONE");
   });
 
   test(".gitignore excludes .env, worktrees/, logs/", () => {

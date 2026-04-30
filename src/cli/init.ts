@@ -105,7 +105,11 @@ const ENV_EXAMPLE_TEMPLATE = `# Required by the host CLI (consumed by tide; NOT 
 LINEAR_API_KEY=
 
 # Required inside the sandbox (forwarded by tide to the docker provider).
+# Set ONE of these to authenticate the in-sandbox \`claude\` CLI:
+#   ANTHROPIC_API_KEY     — Anthropic API key (sk-ant-...)
+#   CLAUDE_CODE_OAUTH_TOKEN — Claude Pro/Max subscription OAuth token
 ANTHROPIC_API_KEY=
+CLAUDE_CODE_OAUTH_TOKEN=
 
 # --- Repo-specific keys ---
 # Add any environment variables your sandbox needs below. Everything in this

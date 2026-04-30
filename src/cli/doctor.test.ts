@@ -127,6 +127,26 @@ describe("tide doctor", () => {
     expect(out).toContain("all checks passed");
   });
 
+  test("all checks pass with CLAUDE_CODE_OAUTH_TOKEN in place of ANTHROPIC_API_KEY", async () => {
+    writeFileSync(
+      join(tideDir, ".env"),
+      "LINEAR_API_KEY=lk\nCLAUDE_CODE_OAUTH_TOKEN=tok\n"
+    );
+    writeValidConfig();
+    const sinks = makeSinks();
+
+    const code = await doctor({
+      repoRoot,
+      stdout: sinks.pushStdout,
+      stderr: sinks.pushStderr,
+      runner: happyRunner(),
+      linearViewerCheck: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    expect(sinks.stdout.join("")).toContain("all checks passed");
+  });
+
   test("gh auth failure exits non-zero with a remediation hint", async () => {
     writeValidEnv();
     writeValidConfig();

@@ -2,15 +2,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Universal env keys that every `.tide/.env` must define.
+ * Strictly-required env keys.
  *
- * `LINEAR_API_KEY` is consumed host-side by the CLI; `ANTHROPIC_API_KEY` is
- * forwarded into the docker sandbox. Every other key in `.tide/.env` is also
- * forwarded.
+ * `LINEAR_API_KEY` is consumed host-side by the CLI; every other key in
+ * `.tide/.env` is forwarded into the docker sandbox.
  */
-export const REQUIRED_ENV_KEYS = [
-  "LINEAR_API_KEY",
+export const REQUIRED_ENV_KEYS = ["LINEAR_API_KEY"] as const;
+
+/**
+ * Auth credential for the in-sandbox `claude` CLI. At least one of these
+ * must be set in `.tide/.env`. Both are valid; both are forwarded if both
+ * are set, and the `claude` CLI picks.
+ */
+export const CLAUDE_AUTH_KEYS = [
   "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
 
 export interface LoadEnvOptions {
@@ -25,6 +31,7 @@ export interface LoadEnvOptions {
  * - the file is missing
  * - any line is malformed (missing `=` or empty key)
  * - any of `REQUIRED_ENV_KEYS` is absent
+ * - none of `CLAUDE_AUTH_KEYS` is set
  *
  * Repo-specific keys pass through unchanged.
  */
@@ -38,10 +45,21 @@ export function loadEnv(options: LoadEnvOptions): Record<string, string> {
   const env = parseEnvText(raw, envPath);
 
   const missing = REQUIRED_ENV_KEYS.filter((k) => !(k in env));
+  const hasAuth = CLAUDE_AUTH_KEYS.some((k) => k in env);
+
+  const errors: string[] = [];
   if (missing.length > 0) {
-    throw new Error(
+    errors.push(
       `tide: ${envPath} is missing required key(s): ${missing.join(", ")}`
     );
+  }
+  if (!hasAuth) {
+    errors.push(
+      `tide: ${envPath} must define ${CLAUDE_AUTH_KEYS.join(" or ")}`
+    );
+  }
+  if (errors.length > 0) {
+    throw new Error(errors.join("\n"));
   }
 
   return env;
