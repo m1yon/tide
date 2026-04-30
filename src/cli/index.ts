@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { doctor } from "./doctor.ts";
 import { init } from "./init.ts";
 
 // VERSION is replaced at compile time via `bun build --compile --define`.
@@ -47,7 +48,7 @@ function notImplemented(name: Subcommand): never {
   process.exit(1);
 }
 
-export function run(argv: readonly string[]): number {
+export function run(argv: readonly string[]): number | Promise<number> {
   const args = argv.slice(2);
 
   if (args.length === 0) {
@@ -75,6 +76,9 @@ export function run(argv: readonly string[]): number {
     if (first === "init") {
       return init();
     }
+    if (first === "doctor") {
+      return doctor();
+    }
     notImplemented(first);
   }
 
@@ -84,6 +88,12 @@ export function run(argv: readonly string[]): number {
 }
 
 if (import.meta.main) {
-  const exitCode = run(process.argv);
-  process.exit(exitCode);
+  const result = run(process.argv);
+  if (typeof result === "number") {
+    process.exit(result);
+  } else {
+    void result.then((code) => {
+      process.exit(code);
+    });
+  }
 }
