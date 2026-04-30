@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { build } from "./build.ts";
 import { doctor } from "./doctor.ts";
 import { init } from "./init.ts";
 
@@ -78,6 +79,9 @@ export function run(argv: readonly string[]): number | Promise<number> {
     }
     if (first === "doctor") {
       return doctor();
+    }
+    if (first === "build") {
+      return build();
     }
     notImplemented(first);
   }
