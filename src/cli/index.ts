@@ -3,6 +3,7 @@
 import { build } from "./build.ts";
 import { doctor } from "./doctor.ts";
 import { init } from "./init.ts";
+import { tideRun } from "./run.ts";
 
 // VERSION is replaced at compile time via `bun build --compile --define`.
 // When running uncompiled (`bun run src/cli/index.ts`), the substitution does
@@ -44,11 +45,6 @@ function printVersion(): void {
   process.stdout.write(`${version}\n`);
 }
 
-function notImplemented(name: Subcommand): never {
-  process.stderr.write(`tide ${name}: not yet implemented\n`);
-  process.exit(1);
-}
-
 export function run(argv: readonly string[]): number | Promise<number> {
   const args = argv.slice(2);
 
@@ -83,7 +79,7 @@ export function run(argv: readonly string[]): number | Promise<number> {
     if (first === "build") {
       return build();
     }
-    notImplemented(first);
+    return tideRun();
   }
 
   process.stderr.write(`tide: unknown command "${first}"\n\n`);
