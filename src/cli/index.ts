@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { init } from "./init.ts";
+
 // VERSION is replaced at compile time via `bun build --compile --define`.
 // When running uncompiled (`bun run src/cli/index.ts`), the substitution does
 // not occur and we fall back to "dev".
@@ -70,6 +72,9 @@ export function run(argv: readonly string[]): number {
   }
 
   if (isSubcommand(first)) {
+    if (first === "init") {
+      return init();
+    }
     notImplemented(first);
   }
 
