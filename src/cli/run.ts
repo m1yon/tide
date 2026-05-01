@@ -1,12 +1,14 @@
 // `tide run` — full PRD-rooted, Linear-tracked agent flow.
 //
 // Steps:
-//   1. discover repo root → load config + env → resolve gh identity
+//   1. discover repo root → capture base branch (fail fast on detached HEAD)
+//      → load config + env → resolve gh identity
 //   2. fetch GitHub triage tree, single-select parent
 //   3. fetch descendant subtree → topo-sort via dep-graph
 //   4. resolve Linear issue (create-or-paste loop)
 //   5. preflight summary + Y/n confirm
 //   6. run Sandcastle iterations per sub-issue (single shared branch)
+//   7. on success: open a PR against the captured base branch
 //
 // The agent itself closes its sub-issue via the prompt template; the runner
 // makes no `gh issue close` call.
@@ -33,6 +35,13 @@ import {
 } from "../github/index.ts";
 import { getGhIdentity } from "../gh-identity/index.ts";
 import type { ParentForLinear } from "../linear/index.ts";
+import {
+  resolveBaseBranch,
+  runPrSubmission as defaultRunPrSubmission,
+  type PrSubmissionResult,
+  type RunPrSubmissionOptions,
+  type ShellRunner,
+} from "../pr-submission/index.ts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { runIssueQueue } from "../runner/index.ts";
 import { pickParent, resolveLinearIssue } from "../selector/index.ts";
@@ -42,6 +51,19 @@ export interface RunOptions {
   repoRoot?: string;
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
+  /**
+   * Test seam: shell runner used for the host-side base-branch capture
+   * (`git rev-parse --abbrev-ref HEAD`). Defaults to a child_process spawn
+   * inside the pr-submission module.
+   */
+  baseBranchShellRunner?: ShellRunner;
+  /**
+   * Test seam: PR submission entry point. Tests can stub this to avoid
+   * actually pushing or invoking Sandcastle.
+   */
+  runPrSubmission?: (
+    options: RunPrSubmissionOptions
+  ) => Promise<PrSubmissionResult>;
 }
 
 /**
@@ -80,6 +102,22 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   let repoRoot: string;
   try {
     repoRoot = options.repoRoot ?? discoverRepoRoot();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr(`${msg}\n`);
+    return 1;
+  }
+
+  // Capture the base branch *before* any other work. This is the branch the
+  // user invoked `tide run` from — it becomes the base for the PR opened at
+  // the tail of the run. Failing fast on detached HEAD here avoids burning a
+  // queue's worth of work only to discover the PR step can't proceed.
+  let baseBranch: string;
+  try {
+    baseBranch = await resolveBaseBranch(
+      repoRoot,
+      options.baseBranchShellRunner
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
@@ -297,8 +335,33 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     return 1;
   }
 
+  // Queue succeeded — submit a PR for the branch against the base branch the
+  // user was on at invocation. Sub-issue #8 of PRD #7: foundation tracer
+  // (placeholder body, "opened" path only).
+  const runPrSubmissionFn = options.runPrSubmission ?? defaultRunPrSubmission;
+  let prResult: PrSubmissionResult;
+  try {
+    prResult = await runPrSubmissionFn({
+      ghRepo,
+      branch: linear.branchName,
+      baseBranch,
+      parentNumber: picked.root.number,
+      parentTitle: picked.root.title,
+      repoRoot,
+      config,
+      sandboxEnv,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(msg);
+    outro(
+      `Done. Completed ${String(runResult.completed)} issue(s) on ${linear.branchName}, but PR submission failed.`
+    );
+    return 1;
+  }
+
   outro(
-    `Done. Completed ${String(runResult.completed)} issue(s) on ${linear.branchName}.`
+    `Done. Completed ${String(runResult.completed)} issue(s) on ${linear.branchName}. PR opened: ${prResult.url}`
   );
   return 0;
 }
