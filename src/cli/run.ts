@@ -22,16 +22,22 @@ import {
   isCancel,
   cancel,
 } from "@clack/prompts";
+import { build as defaultBuild, type BuildOptions } from "./build.ts";
 import { loadConfig, type TideConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
 import { type DepNode, topoSort } from "../dep-graph/index.ts";
 import {
   fetchIssueStates,
   fetchSubtreeStates,
-  fetchTriageTree,
+  fetchTriageTree as defaultFetchTriageTree,
   type GhRepo,
+  type TreeNode,
 } from "../github/index.ts";
-import { getGhIdentity } from "../gh-identity/index.ts";
+import {
+  getGhIdentity as defaultGetGhIdentity,
+  type GetGhIdentityOptions,
+  type GhIdentity,
+} from "../gh-identity/index.ts";
 import type { ParentForLinear } from "../linear/index.ts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { runIssueQueue } from "../runner/index.ts";
@@ -42,6 +48,12 @@ export interface RunOptions {
   repoRoot?: string;
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
+  /** Build step. Tests stub this to avoid spawning docker. */
+  build?: (options: BuildOptions) => Promise<number>;
+  /** gh-identity resolver. Tests stub this to avoid spawning `gh`. */
+  getGhIdentity?: (options: GetGhIdentityOptions) => Promise<GhIdentity>;
+  /** Triage-tree fetcher. Tests stub this to avoid hitting GitHub. */
+  fetchTriageTree?: (ghRepo: GhRepo) => Promise<TreeNode[]>;
 }
 
 /**
@@ -76,6 +88,9 @@ function ensureSandcastleSymlink(repoRoot: string): void {
 export async function tideRun(options: RunOptions = {}): Promise<number> {
   const stdout = options.stdout ?? ((s: string) => process.stdout.write(s));
   const stderr = options.stderr ?? ((s: string) => process.stderr.write(s));
+  const build = options.build ?? defaultBuild;
+  const getGhIdentity = options.getGhIdentity ?? defaultGetGhIdentity;
+  const fetchTriageTree = options.fetchTriageTree ?? defaultFetchTriageTree;
 
   let repoRoot: string;
   try {
@@ -131,6 +146,15 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   // is `.tide/`. Bridge with a symlink so the SDK paths land in the right
   // place. (See PRD: "Sandcastle worktrees and logs land at .tide/...".)
   ensureSandcastleSymlink(repoRoot);
+
+  // Ensure the sandbox image is up to date before any clack UI is started —
+  // streamed docker output otherwise interferes with clack rendering. Docker's
+  // layer cache makes the no-work case cheap and picks up Dockerfile changes
+  // automatically.
+  const buildExit = await build({ repoRoot, stdout, stderr });
+  if (buildExit !== 0) {
+    return buildExit;
+  }
 
   intro("tide run");
 
