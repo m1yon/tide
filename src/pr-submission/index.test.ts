@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import {
+  buildPrPromptArgs,
   countCommitsAhead,
   resolveBaseBranch,
   runPrSubmission,
@@ -187,6 +188,10 @@ describe("runPrSubmission", () => {
       baseBranch: "master",
       parentNumber: 7,
       parentTitle: "PRD: example feature",
+      subIssues: [
+        { number: 8, title: "Foundation tracer" },
+        { number: 9, title: "Pre-flight clack confirm" },
+      ],
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
@@ -214,13 +219,31 @@ describe("runPrSubmission", () => {
     });
     expect(typeof receivedRunOptions.prompt).toBe("string");
     expect(receivedRunOptions.promptFile).toBeUndefined();
-    // Placeholder body must close the parent PRD.
+    // Body must close the parent PRD.
     expect(receivedRunOptions.prompt).toContain("Closes #7");
     // Branch and base must be substituted.
     expect(receivedRunOptions.prompt).toContain("feature/per-32");
     expect(receivedRunOptions.prompt).toContain("master");
     // Repo identifier is injected so the agent can pass --repo correctly.
     expect(receivedRunOptions.prompt).toContain("acme/widget");
+    // PRD URL is derived host-side from owner/repo + parent number and
+    // surfaced to the agent so it can link back from the body.
+    expect(receivedRunOptions.prompt).toContain(
+      "https://github.com/acme/widget/issues/7"
+    );
+    // The bundled rich template ships all six sections plus a Conventional
+    // Commits title rule.
+    expect(receivedRunOptions.prompt).toContain("🚩 The Problem");
+    expect(receivedRunOptions.prompt).toContain("💡 The Solution");
+    expect(receivedRunOptions.prompt).toContain("🏗 Interface Movements");
+    expect(receivedRunOptions.prompt).toContain("📦 Package Breakdowns");
+    expect(receivedRunOptions.prompt).toContain(
+      "🧹 Housekeeping & Secondary Changes"
+    );
+    expect(receivedRunOptions.prompt).toContain("Conventional Commits");
+    // Ordered sub-issue list shows up in the rendered prompt.
+    expect(receivedRunOptions.prompt).toContain("#8 Foundation tracer");
+    expect(receivedRunOptions.prompt).toContain("#9 Pre-flight clack confirm");
 
     // gh pr list ran with --head <branch>.
     const ghCall = calls.find((c) => c.cmd === "gh");
@@ -255,6 +278,7 @@ describe("runPrSubmission", () => {
         baseBranch: "master",
         parentNumber: 7,
         parentTitle: "PRD",
+        subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
         sandboxEnv: {},
@@ -290,6 +314,7 @@ describe("runPrSubmission", () => {
         baseBranch: "master",
         parentNumber: 7,
         parentTitle: "PRD",
+        subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
         sandboxEnv: {},
@@ -319,6 +344,7 @@ describe("runPrSubmission", () => {
         baseBranch: "master",
         parentNumber: 7,
         parentTitle: "PRD",
+        subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
         sandboxEnv: {},
@@ -330,5 +356,94 @@ describe("runPrSubmission", () => {
     expect((err as Error).message).toMatch(
       /PR submission iteration threw.*sandbox failed to start/
     );
+  });
+});
+
+describe("buildPrPromptArgs", () => {
+  const baseInput = {
+    parentNumber: 7,
+    parentTitle: "PRD: example feature",
+    parentUrl: "https://github.com/acme/widget/issues/7",
+    branch: "feature/per-32",
+    baseBranch: "master",
+    repoOwner: "acme",
+    repoName: "widget",
+  };
+
+  it("returns the full set of substitution keys", () => {
+    const args = buildPrPromptArgs({
+      ...baseInput,
+      subIssues: [{ number: 8, title: "Foundation tracer" }],
+    });
+    expect(Object.keys(args).sort()).toEqual(
+      [
+        "BASE_BRANCH",
+        "BRANCH",
+        "PARENT_ID",
+        "PARENT_TITLE",
+        "PARENT_URL",
+        "REPO_NAME",
+        "REPO_OWNER",
+        "SUB_ISSUES",
+      ].sort()
+    );
+    expect(args.PARENT_ID).toBe(7);
+    expect(args.PARENT_TITLE).toBe("PRD: example feature");
+    expect(args.PARENT_URL).toBe("https://github.com/acme/widget/issues/7");
+    expect(args.BRANCH).toBe("feature/per-32");
+    expect(args.BASE_BRANCH).toBe("master");
+    expect(args.REPO_OWNER).toBe("acme");
+    expect(args.REPO_NAME).toBe("widget");
+  });
+
+  it("renders zero sub-issues with a stable placeholder rather than an empty list", () => {
+    const args = buildPrPromptArgs({ ...baseInput, subIssues: [] });
+    expect(args.SUB_ISSUES).toBe("_(none)_");
+  });
+
+  it("renders one sub-issue as a single bullet line", () => {
+    const args = buildPrPromptArgs({
+      ...baseInput,
+      subIssues: [{ number: 42, title: "Wire up the runner" }],
+    });
+    expect(args.SUB_ISSUES).toBe("- #42 Wire up the runner");
+  });
+
+  it("renders many sub-issues in input order, one bullet per", () => {
+    const args = buildPrPromptArgs({
+      ...baseInput,
+      subIssues: [
+        { number: 8, title: "Foundation tracer" },
+        { number: 9, title: "Pre-flight clack confirm" },
+        { number: 10, title: "Rev-list zero-commits gate" },
+      ],
+    });
+    expect(args.SUB_ISSUES).toBe(
+      [
+        "- #8 Foundation tracer",
+        "- #9 Pre-flight clack confirm",
+        "- #10 Rev-list zero-commits gate",
+      ].join("\n")
+    );
+  });
+
+  it("collapses newlines in user-controlled titles to spaces (escaping)", () => {
+    const args = buildPrPromptArgs({
+      ...baseInput,
+      parentTitle: "PRD: line one\nline two",
+      subIssues: [{ number: 100, title: "Title with\r\nembedded\rnewlines" }],
+    });
+    expect(args.PARENT_TITLE).toBe("PRD: line one line two");
+    expect(args.SUB_ISSUES).toBe("- #100 Title with embedded newlines");
+  });
+
+  it("trims surrounding whitespace from titles", () => {
+    const args = buildPrPromptArgs({
+      ...baseInput,
+      parentTitle: "  Padded PRD  ",
+      subIssues: [{ number: 1, title: "  spaced  " }],
+    });
+    expect(args.PARENT_TITLE).toBe("Padded PRD");
+    expect(args.SUB_ISSUES).toBe("- #1 spaced");
   });
 });

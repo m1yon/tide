@@ -42,6 +42,7 @@ import {
   type PrSubmissionResult,
   type RunPrSubmissionOptions,
   type ShellRunner,
+  type SubIssueRef,
 } from "../pr-submission/index.ts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { runIssueQueue } from "../runner/index.ts";
@@ -74,6 +75,8 @@ export interface RunPrTailStepOptions {
   baseBranch: string;
   parentNumber: number;
   parentTitle: string;
+  /** Topo-ordered sub-issues addressed by this PR. */
+  subIssues: SubIssueRef[];
   repoRoot: string;
   config: TideConfig;
   sandboxEnv: Record<string, string>;
@@ -162,6 +165,7 @@ export async function runPrTailStep(
       baseBranch: opts.baseBranch,
       parentNumber: opts.parentNumber,
       parentTitle: opts.parentTitle,
+      subIssues: opts.subIssues,
       repoRoot: opts.repoRoot,
       config: opts.config,
       sandboxEnv: opts.sandboxEnv,
@@ -470,6 +474,7 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     baseBranch,
     parentNumber: picked.root.number,
     parentTitle: picked.root.title,
+    subIssues: orderedForRunner,
     repoRoot,
     config,
     sandboxEnv,

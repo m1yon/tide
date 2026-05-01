@@ -99,6 +99,7 @@ describe("runPrTailStep", () => {
     baseBranch: "master",
     parentNumber: 7,
     parentTitle: "PRD: example feature",
+    subIssues: [{ number: 8, title: "Foundation tracer" }],
     repoRoot: "/repo",
     config: baseConfig,
     sandboxEnv: {},

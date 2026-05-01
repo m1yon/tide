@@ -6,13 +6,14 @@
 // via `gh pr list --head <branch>` (the iteration produces no commit, so the
 // runner's commit-based isFailedRun heuristic is not reused).
 //
-// This is the foundation tracer per issue #8 — a placeholder PR body with
-// just `Closes #<PRD>` is sufficient. The rich interface-emphasizing
-// template lands in a follow-up issue.
+// The bundled prompt template is interface-emphasizing (Ousterhout: the
+// change callers see is the change that matters) and ships as a TypeScript
+// string constant — not user-editable like `.tide/prompt.md`. Substitution
+// is driven by `buildPrPromptArgs`, a pure function that returns the
+// `{{KEY}}` map applied to the template.
 //
-// Scope: only the "opened" path. The "updated" path (re-run with an existing
-// PR), the rev-list gate, the clack confirm, and the bundled rich template
-// are all out of scope for this slice.
+// Scope: only the "opened" path. The "updated" path (re-run with an
+// existing PR) is out of scope for this slice.
 
 import { spawn } from "node:child_process";
 import { log } from "@clack/prompts";
@@ -35,12 +36,20 @@ export type ShellRunner = (
 
 export type SandcastleRun = typeof defaultSandcastleRun;
 
+export interface SubIssueRef {
+  number: number;
+  title: string;
+}
+
 export interface RunPrSubmissionOptions {
   ghRepo: GhRepo;
   branch: string;
   baseBranch: string;
   parentNumber: number;
   parentTitle: string;
+  // Topo-ordered sub-issues addressed by this PR. Surfaces in the rendered
+  // prompt's Context section so the agent can scope its diff summary.
+  subIssues: SubIssueRef[];
   repoRoot: string;
   config: TideConfig;
   // Env map intended for the docker sandbox. Caller is responsible for
@@ -139,54 +148,163 @@ export async function resolveBaseBranch(
   return branch;
 }
 
+// Bundled, interface-emphasizing PR template. Renders six body sections
+// (🚩 The Problem · 💡 The Solution · 🏗 Interface Movements · 📦 Package
+// Breakdowns · 🧹 Housekeeping & Secondary Changes · `Closes #<PRD>`) plus a
+// Conventional Commits title rule. The agent classifies changed identifiers
+// as public/private using the rules in the `Interface Movements` section
+// and populates the table only with public surface that actually moved.
+//
+// Single-phase: no `<sub>Files-changed:</sub>` anchor links — those would
+// require a two-phase create-then-edit flow to inject post-creation URLs.
 const PR_PROMPT_TEMPLATE = `You are submitting a pull request for parent issue #{{PARENT_ID}}: {{PARENT_TITLE}}.
 
 The current working branch is \`{{BRANCH}}\` (already pushed to origin). Open a pull request against the base branch \`{{BASE_BRANCH}}\` for the repository \`{{REPO_OWNER}}/{{REPO_NAME}}\`.
 
-Use the following exact PR body (it includes the \`Closes #{{PARENT_ID}}\` reference so merging the PR auto-closes the parent issue):
+# Context
 
------ BEGIN PR BODY -----
-{{PR_BODY}}
------ END PR BODY -----
+- Parent PRD: {{PARENT_URL}}
+- Sub-issues addressed (in order):
+{{SUB_ISSUES}}
 
-Suggested PR title (you may refine based on the diff, but keep it concise and descriptive):
-  {{PR_TITLE}}
+# Title
+
+Use Conventional Commits: \`<type>(<scope>): <subject>\`.
+
+- \`<type>\` is one of \`feat\`, \`fix\`, \`chore\`, \`docs\`, \`refactor\`, \`test\`, \`build\`, \`ci\`, \`perf\`, \`style\`. Pick the type that best matches the headline change in the diff.
+- \`<scope>\` is the package or area touched. Optional — omit it for multi-package PRDs that span scopes.
+- \`<subject>\` is a concise, imperative-mood summary derived from the diff.
+
+Examples: \`feat(runner): add per-iteration timeout\` or \`refactor: extract pr-submission module\`.
+
+# Body — sections in this exact order
+
+Render the body as the sections below, in order, with the exact emoji headers shown. End with the \`Closes #{{PARENT_ID}}\` line.
+
+## 🚩 The Problem
+
+2–4 bullets. What was wrong, missing, or painful before this change. Frame from the user's or caller's point of view, not the implementer's.
+
+## 💡 The Solution
+
+2–4 bullets. What changed at the conceptual level. Where it applies, name the operation explicitly:
+
+- **Deepen** — add functionality behind an existing interface.
+- **Widen** — broaden an interface to handle a new shape of input/output.
+- **Extract** — pull a chunk into a new module with its own boundary.
+
+## 🏗 Interface Movements
+
+A markdown table with columns: \`Symbol | Old location | New location | Notes\`.
+
+Populate the table only with **public** surface that actually moved. Public means anything a caller outside this PR's diff could observe:
+
+- TypeScript / JavaScript: any symbol exported via \`export\` from a package or a public module entry point. Internal helpers (un-exported, or under an \`_internal\` re-export) are private.
+- HTTP / RPC: any route, method, request/response field, or status code reachable from outside the service.
+- CLI: any command, sub-command, flag, or environment variable.
+- Config: any key in user-facing config files (\`.tide/config.ts\`, \`package.json\`'s public fields, etc.).
+
+If nothing public moved, write \`_(no public surface moved)_\` instead of an empty table.
+
+## 📦 Package Breakdowns
+
+For each package or top-level directory that changed, add a \`<details>\` block:
+
+    <details>
+    <summary><code>src/&lt;package&gt;/</code> — one-line summary</summary>
+
+    - bullet describing the change in this package
+    - another bullet
+
+    </details>
+
+Group by directory, not by file. Order packages so a reviewer can walk through them naturally — entry points first, then leaf modules, then tests.
+
+## 🧹 Housekeeping & Secondary Changes
+
+Anything that is not part of the headline change but ships in the same PR: dependency bumps, formatting passes, comment cleanups, test refactors, docs touch-ups. One bullet per item. If there is none, write \`_(none)_\`.
+
+## Closes
+
+End the body with a single line: \`Closes #{{PARENT_ID}}\`. This auto-closes the parent PRD when the PR merges. Do not include \`<sub>Files-changed:</sub>\` anchor links — the bundled template uses a single-phase \`gh pr create\` and does not inject post-creation URLs.
+
+# How to submit
 
 Run \`gh pr create\` against the right base. A safe invocation:
 
-  gh pr create \\
-    --repo {{REPO_OWNER}}/{{REPO_NAME}} \\
-    --base {{BASE_BRANCH}} \\
-    --head {{BRANCH}} \\
-    --title "<your title here>" \\
-    --body-file <(cat <<'EOF'
-{{PR_BODY}}
-EOF
-)
+    gh pr create \\
+      --repo {{REPO_OWNER}}/{{REPO_NAME}} \\
+      --base {{BASE_BRANCH}} \\
+      --head {{BRANCH}} \\
+      --title "<your title here>" \\
+      --body-file <(cat <<'PR_BODY_EOF'
+    <your fully-rendered body here, including the Closes line>
+    PR_BODY_EOF
+    )
 
 When the PR has been opened successfully, emit <promise>COMPLETE</promise> and exit. Do not edit any files in the working tree.
 `;
 
-function buildPrompt(opts: {
+export interface BuildPrPromptArgsInput {
   parentNumber: number;
   parentTitle: string;
+  parentUrl: string;
   branch: string;
   baseBranch: string;
-  ghRepo: GhRepo;
-}): string {
-  const placeholderTitle = `tide: ${opts.parentTitle}`;
-  const placeholderBody = `Closes #${String(opts.parentNumber)}\n\nAutomated submission for parent issue #${String(opts.parentNumber)}: ${opts.parentTitle}.`;
-  return PR_PROMPT_TEMPLATE.replaceAll(
-    "{{PARENT_ID}}",
-    String(opts.parentNumber)
-  )
-    .replaceAll("{{PARENT_TITLE}}", opts.parentTitle)
-    .replaceAll("{{BRANCH}}", opts.branch)
-    .replaceAll("{{BASE_BRANCH}}", opts.baseBranch)
-    .replaceAll("{{REPO_OWNER}}", opts.ghRepo.owner)
-    .replaceAll("{{REPO_NAME}}", opts.ghRepo.repo)
-    .replaceAll("{{PR_TITLE}}", placeholderTitle)
-    .replaceAll("{{PR_BODY}}", placeholderBody);
+  repoOwner: string;
+  repoName: string;
+  subIssues: SubIssueRef[];
+}
+
+export type PrPromptArgsRecord = Record<string, string | number>;
+
+const SUB_ISSUES_NONE = "_(none)_";
+
+// Collapse internal whitespace runs (including embedded newlines and
+// carriage returns) to a single space, then trim. Keeps user-controlled
+// titles from breaking the markdown structure of the rendered prompt.
+function sanitizeInline(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function renderSubIssues(subs: readonly SubIssueRef[]): string {
+  if (subs.length === 0) return SUB_ISSUES_NONE;
+  return subs
+    .map((s) => `- #${String(s.number)} ${sanitizeInline(s.title)}`)
+    .join("\n");
+}
+
+/**
+ * Pure: build the `{{KEY}}` substitution map for the bundled PR prompt
+ * template. Returns numbers as numbers and strings as strings so the
+ * record matches the shape Sandcastle's `promptArgs` accepts. Titles are
+ * inlined (newlines collapsed, trimmed) to keep template substitution from
+ * breaking the surrounding markdown.
+ */
+export function buildPrPromptArgs(
+  input: BuildPrPromptArgsInput
+): PrPromptArgsRecord {
+  return {
+    PARENT_ID: input.parentNumber,
+    PARENT_TITLE: sanitizeInline(input.parentTitle),
+    PARENT_URL: input.parentUrl,
+    BRANCH: input.branch,
+    BASE_BRANCH: input.baseBranch,
+    REPO_OWNER: input.repoOwner,
+    REPO_NAME: input.repoName,
+    SUB_ISSUES: renderSubIssues(input.subIssues),
+  };
+}
+
+function applyPromptTemplate(
+  template: string,
+  args: PrPromptArgsRecord
+): string {
+  let out = template;
+  for (const [key, value] of Object.entries(args)) {
+    out = out.replaceAll(`{{${key}}}`, String(value));
+  }
+  return out;
 }
 
 interface PrListItem {
@@ -234,6 +352,7 @@ export async function runPrSubmission(
     baseBranch,
     parentNumber,
     parentTitle,
+    subIssues,
     repoRoot,
     config,
     sandboxEnv,
@@ -257,16 +376,20 @@ export async function runPrSubmission(
     );
   }
 
-  // Step 2: fire the Sandcastle iteration with the bundled placeholder
-  // prompt. Inline `prompt` (not `promptFile`) — the template ships in tide
-  // source and is not user-editable.
-  const prompt = buildPrompt({
+  // Step 2: fire the Sandcastle iteration with the bundled, interface-
+  // emphasizing prompt. Inline `prompt` (not `promptFile`) — the template
+  // ships in tide source and is not user-editable.
+  const promptArgs = buildPrPromptArgs({
     parentNumber,
     parentTitle,
+    parentUrl: `https://github.com/${ghRepo.owner}/${ghRepo.repo}/issues/${String(parentNumber)}`,
     branch,
     baseBranch,
-    ghRepo,
+    repoOwner: ghRepo.owner,
+    repoName: ghRepo.repo,
+    subIssues,
   });
+  const prompt = applyPromptTemplate(PR_PROMPT_TEMPLATE, promptArgs);
 
   const sandbox = docker({
     mounts: config.sandbox.mounts,
