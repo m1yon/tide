@@ -106,37 +106,60 @@ describe("tide init", () => {
     expect(gitignore).toContain("logs/");
   });
 
-  test("refuses and exits non-zero when any target file already exists", () => {
+  test("creates missing files without overwriting existing ones", () => {
     const tideDir = join(repoRoot, ".tide");
     mkdirSync(tideDir, { recursive: true });
     writeFileSync(join(tideDir, "config.ts"), "// pre-existing\n");
+    writeFileSync(join(tideDir, "Dockerfile"), "# pre-existing\n");
 
     const code = init({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
     });
-    expect(code).toBe(1);
-    const stderr = stderrChunks.join("");
-    expect(stderr).toContain("config.ts");
-    expect(stderr.toLowerCase()).toContain("refus");
+    expect(code).toBe(0);
+
+    expect(readFileSync(join(tideDir, "config.ts"), "utf8")).toBe(
+      "// pre-existing\n"
+    );
+    expect(readFileSync(join(tideDir, "Dockerfile"), "utf8")).toBe(
+      "# pre-existing\n"
+    );
+
+    expect(existsSync(join(tideDir, "prompt.md"))).toBe(true);
+    expect(existsSync(join(tideDir, ".env.example"))).toBe(true);
+    expect(existsSync(join(tideDir, ".gitignore"))).toBe(true);
+
+    const stdout = stdoutChunks.join("");
+    expect(stdout).toContain("created");
+    expect(stdout).toContain("prompt.md");
+    expect(stdout).toContain("skipped");
+    expect(stdout).toContain("config.ts");
+    expect(stdout).toContain("Dockerfile");
   });
 
-  test("error message lists all conflicting files when multiple exist", () => {
-    const tideDir = join(repoRoot, ".tide");
-    mkdirSync(tideDir, { recursive: true });
-    writeFileSync(join(tideDir, "config.ts"), "// x\n");
-    writeFileSync(join(tideDir, "Dockerfile"), "# x\n");
-
-    const code = init({
+  test("is idempotent: running twice does not overwrite or error", () => {
+    const first = init({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
     });
-    expect(code).toBe(1);
-    const stderr = stderrChunks.join("");
-    expect(stderr).toContain("config.ts");
-    expect(stderr).toContain("Dockerfile");
+    expect(first).toBe(0);
+
+    const tideDir = join(repoRoot, ".tide");
+    const promptPath = join(tideDir, "prompt.md");
+    writeFileSync(promptPath, "# user edits\n");
+
+    stdoutChunks = [];
+    stderrChunks = [];
+    const second = init({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+    });
+    expect(second).toBe(0);
+    expect(readFileSync(promptPath, "utf8")).toBe("# user edits\n");
+    expect(stdoutChunks.join("")).toContain("nothing to do");
   });
 
   test("does not require .tide/config.ts to exist before running", () => {

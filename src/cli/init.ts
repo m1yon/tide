@@ -35,8 +35,7 @@ export interface InitOptions {
 
 /**
  * Scaffolds a `.tide/` directory at the discovered (or supplied) repo root.
- * Refuses and returns a non-zero exit code if any of the target files
- * already exist.
+ * Creates any missing target files; existing files are left untouched.
  */
 export function init(options: InitOptions = {}): number {
   const stdout = options.stdout ?? ((s: string) => process.stdout.write(s));
@@ -52,26 +51,34 @@ export function init(options: InitOptions = {}): number {
   }
 
   const tideDir = join(repoRoot, ".tide");
-  const existing: string[] = [];
-  for (const { name } of TARGETS) {
-    if (existsSync(join(tideDir, name))) {
-      existing.push(`.tide/${name}`);
-    }
-  }
-
-  if (existing.length > 0) {
-    stderr(
-      `tide init: refusing to overwrite existing file(s):\n${existing.map((f) => `  - ${f}`).join("\n")}\n`
-    );
-    return 1;
-  }
-
   mkdirSync(tideDir, { recursive: true });
+
+  const created: string[] = [];
+  const skipped: string[] = [];
   for (const { name, content } of TARGETS) {
-    writeFileSync(join(tideDir, name), content);
+    const path = join(tideDir, name);
+    if (existsSync(path)) {
+      skipped.push(`.tide/${name}`);
+      continue;
+    }
+    writeFileSync(path, content);
+    created.push(`.tide/${name}`);
+  }
+
+  if (created.length === 0) {
+    stdout(`tide: .tide/ already scaffolded at ${repoRoot}; nothing to do\n`);
+    return 0;
   }
 
   stdout(`tide: scaffolded .tide/ at ${repoRoot}\n`);
+  if (created.length > 0) {
+    stdout(`  created:\n`);
+    for (const f of created) stdout(`    - ${f}\n`);
+  }
+  if (skipped.length > 0) {
+    stdout(`  skipped (already exist):\n`);
+    for (const f of skipped) stdout(`    - ${f}\n`);
+  }
   stdout(`  next steps:\n`);
   stdout(`    1. set linear.team in .tide/config.ts\n`);
   stdout(`    2. copy .tide/.env.example to .tide/.env and fill in keys\n`);
