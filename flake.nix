@@ -34,9 +34,12 @@
             src = ./.;
             filter = path: type:
               let
-                base = baseNameOf (toString path);
+                relPath = pkgs.lib.removePrefix (toString ./. + "/") (toString path);
               in
-              base == "package.json" || base == "bun.lock";
+              relPath == "package.json"
+              || relPath == "bun.lock"
+              || relPath == "patches"
+              || pkgs.lib.hasPrefix "patches/" relPath;
           };
 
           nativeBuildInputs = [ pkgs.bun pkgs.cacert ];
@@ -72,7 +75,7 @@
           # `bun.lock` changes — `nix build` will print the new hash on
           # mismatch. To force a re-derivation, swap this for
           # `pkgs.lib.fakeSha256` and rerun `nix build`.
-          outputHash = "sha256-1G+3doviAYR4yDWieLfiSi7du+znu0c350FzYOHLHU4=";
+          outputHash = "sha256-IXjdJYgUXWcX6/PGy/jc3EDgEzBl2+5zE14XObEgt+k=";
         };
 
         tide = pkgs.stdenv.mkDerivation {
