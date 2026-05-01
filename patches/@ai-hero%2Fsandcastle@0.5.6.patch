@@ -1,0 +1,22 @@
+diff --git a/dist/WorktreeManager.js b/dist/WorktreeManager.js
+index 61fbc343cc1ab61cdaa73e208c78259a8a230e5e..2257d6b7d0fa06e6704d1aea81af971a8600ee6c 100644
+--- a/dist/WorktreeManager.js
++++ b/dist/WorktreeManager.js
+@@ -118,8 +118,16 @@ export const create = (repoDir, opts) => Effect.gen(function* () {
+         const collision = existing.find((wt) => wt.branch === branch) ??
+             existing.find((wt) => wt.path === worktreePath);
+         if (collision) {
++            // `git worktree list` canonicalizes paths via realpath. If repoDir
++            // or .sandcastle is a symlink, the un-canonicalized prefix never
++            // matches and a sandcastle-owned worktree looks external. Resolve
++            // the prefix so the startsWith check accepts either form.
++            const realWorktreesDir = yield* fs
++                .realPath(worktreesDir)
++                .pipe(Effect.catchAll(() => Effect.succeed(worktreesDir)));
+             // Only reuse worktrees managed by sandcastle (under .sandcastle/worktrees/)
+-            const isManagedWorktree = collision.path.startsWith(worktreesDir);
++            const isManagedWorktree = collision.path.startsWith(worktreesDir) ||
++                collision.path.startsWith(realWorktreesDir);
+             if (isManagedWorktree) {
+                 const dirty = yield* hasUncommittedChanges(collision.path);
+                 if (dirty) {
