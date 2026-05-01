@@ -5,7 +5,7 @@
 export default {
   linear: {
     // Linear team key (the prefix Linear assigns to issues, e.g. "ENG").
-    team: "REPLACE_ME",
+    team: "PER",
   },
 
   // Optional. Bind-mount host paths into the docker sandbox.
