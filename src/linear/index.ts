@@ -1,26 +1,53 @@
-// Linear SDK facade. Two operations only:
+// Linear SDK facade. Operations:
 //   - createIssueForParent(...): create a new Linear issue on the configured
 //     team in "In Progress", assigned to the API key's owner, titled
-//     `[GH-#NN] <title>`, with a body linking back to the GitHub parent and
-//     listing in-scope sub-issues. Returns `{ branchName, identifier, url }`.
-//   - fetchExistingIssue(identifier): fetch an existing Linear issue by its
-//     human identifier (e.g. "MEC-680") and return the same triple.
+//     `[GH-#NN] <title>`, tagged with the `PRD` label, with a body linking
+//     back to the GitHub parent and listing in-scope sub-issues. Returns
+//     `{ branchName, identifier, url }`.
+//   - listExistingPRDs(...): list every Linear issue on the configured team
+//     that carries the `PRD` label and is in a non-terminal workflow state
+//     (state.type in {triage, backlog, unstarted, started}), ordered by
+//     `updatedAt` desc. The returned shape carries everything `tide run`
+//     needs to use the issue as the run's tracker without a second
+//     round-trip.
 //
-// Team UUID and "In Progress" workflow-state UUID are looked up at runtime via
-// the SDK; failure to find either is a hard exit (caller decides).
+// The `PRD` label is hardcoded, scoped to the configured Linear team, and
+// auto-created lazily on first use if missing. See
+// docs/adr/0002-prd-label-as-tide-linear-marker.md for the rationale.
+//
+// Team UUID, PRD label UUID, and "In Progress" workflow-state UUID are
+// looked up at runtime via the SDK; failure to find the team or the
+// "In Progress" state is a hard exit (caller decides).
 //
 // Credentials: `apiKey` is passed in (loaded from `<repoRoot>/.tide/.env` by
 // the caller). The team key and GitHub URL builder are also injected so this
 // module is repo-agnostic.
 
-import { LinearClient } from "@linear/sdk";
+import { LinearClient, PaginationOrderBy } from "@linear/sdk";
 
 const IN_PROGRESS_STATE_NAME = "In Progress";
+const PRD_LABEL_NAME = "PRD";
+const ACTIVE_STATE_TYPES = [
+  "triage",
+  "backlog",
+  "unstarted",
+  "started",
+] as const;
 
 export interface LinearResult {
   branchName: string;
   identifier: string;
   url: string;
+}
+
+export interface ExistingPRD {
+  identifier: string;
+  title: string;
+  /** Workflow-state name (e.g. "In Progress"). */
+  state: string;
+  branchName: string;
+  url: string;
+  updatedAt: Date;
 }
 
 export interface ParentForLinear {
@@ -81,6 +108,35 @@ async function findInProgressStateId(
   return state.id;
 }
 
+// Find the team-scoped `PRD` label, creating it if absent. Tide owns this
+// label — see ADR 0002 — so lazy auto-create is the right contract here.
+async function findOrCreatePrdLabelId(
+  c: LinearClient,
+  teamId: string
+): Promise<string> {
+  const existing = await c.issueLabels({
+    filter: {
+      team: { id: { eq: teamId } },
+      name: { eq: PRD_LABEL_NAME },
+    },
+  });
+  const found = existing.nodes[0];
+  if (found) return found.id;
+
+  const payload = await c.createIssueLabel({
+    teamId,
+    name: PRD_LABEL_NAME,
+  });
+  if (!payload.success) {
+    throw new Error("Linear createIssueLabel returned success=false.");
+  }
+  const labelId = payload.issueLabelId;
+  if (typeof labelId !== "string" || labelId === "") {
+    throw new Error("Linear createIssueLabel did not return a label id.");
+  }
+  return labelId;
+}
+
 function buildBody(
   parent: ParentForLinear,
   ghIssueUrl: (n: number) => string
@@ -112,7 +168,10 @@ export async function createIssueForParent(
     findTeamId(c, ctx.teamKey),
     c.viewer,
   ]);
-  const stateId = await findInProgressStateId(c, teamId, ctx.teamKey);
+  const [stateId, labelId] = await Promise.all([
+    findInProgressStateId(c, teamId, ctx.teamKey),
+    findOrCreatePrdLabelId(c, teamId),
+  ]);
 
   const title = `[GH-#${String(parent.number)}] ${parent.title}`;
   const description = buildBody(parent, ctx.ghIssueUrl);
@@ -121,6 +180,7 @@ export async function createIssueForParent(
     teamId,
     stateId,
     assigneeId: viewer.id,
+    labelIds: [labelId],
     title,
     description,
   });
@@ -138,18 +198,50 @@ export async function createIssueForParent(
   };
 }
 
-export async function fetchExistingIssue(
-  ctx: LinearContext,
-  identifier: string
-): Promise<LinearResult> {
+// List every PRD-labelled issue on the configured team in a non-terminal
+// workflow state, ordered by `updatedAt` desc. The PRD label is created
+// lazily if absent (matching createIssueForParent), which means an empty
+// list is a real "no candidates", not a "label is missing" error.
+//
+// Workflow state is filtered by `type` (not name) so team-level renames of
+// "Done"/"Cancelled" don't slip terminal issues into the select.
+//
+// Workflow-state names are resolved via a single batched lookup of the
+// team's states; per-issue `issue.state` would be N+1.
+export async function listExistingPRDs(
+  ctx: LinearContext
+): Promise<ExistingPRD[]> {
   const c = client(ctx.apiKey);
-  // The SDK's `issue(id)` accepts both UUIDs and human identifiers like
-  // "MEC-680". Throws on not-found / no-access; let it propagate so the
-  // caller can re-prompt or hard-exit as appropriate.
-  const issue = await c.issue(identifier);
-  return {
-    branchName: issue.branchName,
+  const teamId = await findTeamId(c, ctx.teamKey);
+  // Touch the label to ensure it exists; the issues filter below would
+  // simply return [] if the label doesn't exist yet, so the create path
+  // here is purely for the create-new branch's later use.
+  await findOrCreatePrdLabelId(c, teamId);
+
+  const [issuesConn, statesConn] = await Promise.all([
+    c.issues({
+      filter: {
+        team: { id: { eq: teamId } },
+        labels: { name: { eq: PRD_LABEL_NAME } },
+        state: { type: { in: [...ACTIVE_STATE_TYPES] } },
+      },
+      orderBy: PaginationOrderBy.UpdatedAt,
+    }),
+    c.workflowStates({ filter: { team: { id: { eq: teamId } } } }),
+  ]);
+
+  const stateNameById = new Map<string, string>();
+  for (const s of statesConn.nodes) stateNameById.set(s.id, s.name);
+
+  return issuesConn.nodes.map((issue) => ({
     identifier: issue.identifier,
+    title: issue.title,
+    state:
+      typeof issue.stateId === "string"
+        ? (stateNameById.get(issue.stateId) ?? "")
+        : "",
+    branchName: issue.branchName,
     url: issue.url,
-  };
+    updatedAt: issue.updatedAt,
+  }));
 }
