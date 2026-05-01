@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import {
+  countCommitsAhead,
   resolveBaseBranch,
   runPrSubmission,
   type ShellResult,
@@ -100,6 +101,52 @@ describe("resolveBaseBranch", () => {
     const err = await captureError(resolveBaseBranch("/tmp/repo", runner));
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/git rev-parse.*failed/);
+  });
+});
+
+describe("countCommitsAhead", () => {
+  it("returns the parsed integer count on success", async () => {
+    const { runner, calls } = buildShellRunner([
+      {
+        match: (c) =>
+          c.cmd === "git" &&
+          c.args[0] === "rev-list" &&
+          c.args[1] === "--count",
+        result: { exitCode: 0, stdout: "5\n", stderr: "" },
+      },
+    ]);
+    const n = await countCommitsAhead("/tmp/repo", "main", "feature/x", runner);
+    expect(n).toBe(5);
+    expect(calls[0]?.args).toEqual(["rev-list", "--count", "main..feature/x"]);
+  });
+
+  it("returns 0 when the branch has no commits ahead of base", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git" && c.args[0] === "rev-list",
+        result: { exitCode: 0, stdout: "0\n", stderr: "" },
+      },
+    ]);
+    const n = await countCommitsAhead("/tmp/repo", "main", "feature/x", runner);
+    expect(n).toBe(0);
+  });
+
+  it("throws when git rev-list exits non-zero", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git" && c.args[0] === "rev-list",
+        result: {
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: ambiguous argument",
+        },
+      },
+    ]);
+    const err = await captureError(
+      countCommitsAhead("/tmp/repo", "main", "feature/x", runner)
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/git rev-list.*failed/);
   });
 });
 

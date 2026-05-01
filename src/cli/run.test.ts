@@ -103,6 +103,9 @@ describe("runPrTailStep", () => {
     config: baseConfig,
     sandboxEnv: {},
     completedCount: 3,
+    // Default to non-zero so tests that don't care about the rev-list gate
+    // exercise the runPrSubmission path.
+    countCommitsAhead: () => Promise.resolve(5),
   };
 
   test("confirm=no: skips runPrSubmission, returns opted-out outcome with distinct outro", async () => {
@@ -129,6 +132,58 @@ describe("runPrTailStep", () => {
     expect(result.outroMessage).toContain("PR step skipped");
     expect(result.outroMessage).not.toContain("PR opened");
     expect(result.outroMessage).not.toContain("PR submission failed");
+  });
+
+  test("confirm=yes + zero commits ahead: skips runPrSubmission, returns skipped-empty outcome with distinct outro", async () => {
+    let prCalls = 0;
+    const runPrSubmission = (): Promise<PrSubmissionResult> => {
+      prCalls += 1;
+      return Promise.resolve({
+        url: "should-not-be-called",
+        action: "opened",
+      });
+    };
+
+    let countCalls = 0;
+    const countCommitsAhead = (): Promise<number> => {
+      countCalls += 1;
+      return Promise.resolve(0);
+    };
+
+    const result = await runPrTailStep({
+      ...baseInput,
+      prCreationConfirmed: true,
+      countCommitsAhead,
+      runPrSubmission,
+    });
+
+    expect(prCalls).toBe(0);
+    expect(countCalls).toBe(1);
+    expect(result.outcome).toEqual({ kind: "skipped-empty" });
+    expect(result.exitCode).toBe(0);
+    // Distinct outro: identifies zero-commits as the reason, not opt-out
+    // and not failure.
+    expect(result.outroMessage).toContain("PR step skipped");
+    expect(result.outroMessage).toContain("no commits ahead");
+    expect(result.outroMessage).not.toContain("opted out");
+    expect(result.outroMessage).not.toContain("PR submission failed");
+  });
+
+  test("confirm=no: rev-list gate is not run (opt-out short-circuits)", async () => {
+    let countCalls = 0;
+    const countCommitsAhead = (): Promise<number> => {
+      countCalls += 1;
+      return Promise.resolve(0);
+    };
+
+    const result = await runPrTailStep({
+      ...baseInput,
+      prCreationConfirmed: false,
+      countCommitsAhead,
+    });
+
+    expect(countCalls).toBe(0);
+    expect(result.outcome).toEqual({ kind: "opted-out" });
   });
 
   test("confirm=yes: invokes runPrSubmission and returns opened outcome", async () => {

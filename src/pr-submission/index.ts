@@ -81,6 +81,36 @@ async function defaultShellRunner(
 }
 
 /**
+ * Count how many commits `branch` is ahead of `baseBranch` via
+ * `git rev-list --count <baseBranch>..<branch>`. Used host-side as the gate
+ * before invoking the PR-submission iteration: a zero-commits branch can't
+ * produce a meaningful PR.
+ */
+export async function countCommitsAhead(
+  repoRoot: string,
+  baseBranch: string,
+  branch: string,
+  shellRunner: ShellRunner = defaultShellRunner
+): Promise<number> {
+  const range = `${baseBranch}..${branch}`;
+  const r = await shellRunner("git", ["rev-list", "--count", range], repoRoot);
+  if (r.exitCode !== 0) {
+    const stderr = r.stderr.trim();
+    throw new Error(
+      `tide: \`git rev-list --count ${range}\` failed (exit ${String(r.exitCode)})${stderr === "" ? "" : `: ${stderr}`}`
+    );
+  }
+  const trimmed = r.stdout.trim();
+  const n = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(n) || n < 0 || String(n) !== trimmed) {
+    throw new Error(
+      `tide: \`git rev-list --count ${range}\` returned non-numeric output: ${trimmed}`
+    );
+  }
+  return n;
+}
+
+/**
  * Capture the current branch via `git rev-parse --abbrev-ref HEAD`. Throws
  * with a clear message on detached HEAD ("HEAD") so the caller can fail fast
  * before any Sandcastle work runs.

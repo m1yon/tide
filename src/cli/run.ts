@@ -36,6 +36,7 @@ import {
 import { getGhIdentity } from "../gh-identity/index.ts";
 import type { ParentForLinear } from "../linear/index.ts";
 import {
+  countCommitsAhead as defaultCountCommitsAhead,
   resolveBaseBranch,
   runPrSubmission as defaultRunPrSubmission,
   type PrSubmissionResult,
@@ -81,10 +82,17 @@ export interface RunPrTailStepOptions {
   runPrSubmission?: (
     options: RunPrSubmissionOptions
   ) => Promise<PrSubmissionResult>;
+  /** Test seam — defaults to the imported `countCommitsAhead`. */
+  countCommitsAhead?: (
+    repoRoot: string,
+    baseBranch: string,
+    branch: string
+  ) => Promise<number>;
 }
 
 export type PrTailOutcome =
   | { kind: "opted-out" }
+  | { kind: "skipped-empty" }
   | { kind: "opened"; url: string }
   | { kind: "failed"; message: string };
 
@@ -110,6 +118,38 @@ export async function runPrTailStep(
     return {
       outcome: { kind: "opted-out" },
       outroMessage: `Done. ${completedSummary}. PR step skipped (you opted out at pre-flight).`,
+      exitCode: 0,
+    };
+  }
+
+  // Rev-list gate: if the branch is not ahead of base, there is nothing to
+  // submit. Run after the opt-out check so we don't shell out when the user
+  // already declined.
+  const countCommitsAheadFn =
+    opts.countCommitsAhead ?? defaultCountCommitsAhead;
+  let commitsAhead: number;
+  try {
+    commitsAhead = await countCommitsAheadFn(
+      opts.repoRoot,
+      opts.baseBranch,
+      opts.branch
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      outcome: { kind: "failed", message },
+      outroMessage: `Done. ${completedSummary}, but PR submission failed.`,
+      exitCode: 1,
+    };
+  }
+
+  if (commitsAhead === 0) {
+    log.warn(
+      `Branch ${opts.branch} has no commits ahead of ${opts.baseBranch}. Skipping PR step — there is nothing to submit.`
+    );
+    return {
+      outcome: { kind: "skipped-empty" },
+      outroMessage: `Done. ${completedSummary}. PR step skipped (no commits ahead of ${opts.baseBranch}).`,
       exitCode: 0,
     };
   }
