@@ -66,6 +66,81 @@ export interface RunOptions {
   ) => Promise<PrSubmissionResult>;
 }
 
+export interface RunPrTailStepOptions {
+  prCreationConfirmed: boolean;
+  ghRepo: GhRepo;
+  branch: string;
+  baseBranch: string;
+  parentNumber: number;
+  parentTitle: string;
+  repoRoot: string;
+  config: TideConfig;
+  sandboxEnv: Record<string, string>;
+  completedCount: number;
+  /** Test seam — defaults to the imported `runPrSubmission`. */
+  runPrSubmission?: (
+    options: RunPrSubmissionOptions
+  ) => Promise<PrSubmissionResult>;
+}
+
+export type PrTailOutcome =
+  | { kind: "opted-out" }
+  | { kind: "opened"; url: string }
+  | { kind: "failed"; message: string };
+
+export interface PrTailStepResult {
+  outcome: PrTailOutcome;
+  outroMessage: string;
+  exitCode: 0 | 1;
+}
+
+/**
+ * Decide and execute the post-queue PR-submission tail step. Returns the
+ * outro message and exit code so the caller (tideRun) can render UI
+ * uniformly. The caller is expected to short-circuit on aborted runs before
+ * invoking this helper; the only skip path handled here is the user's
+ * pre-flight opt-out.
+ */
+export async function runPrTailStep(
+  opts: RunPrTailStepOptions
+): Promise<PrTailStepResult> {
+  const completedSummary = `Completed ${String(opts.completedCount)} issue(s) on ${opts.branch}`;
+
+  if (!opts.prCreationConfirmed) {
+    return {
+      outcome: { kind: "opted-out" },
+      outroMessage: `Done. ${completedSummary}. PR step skipped (you opted out at pre-flight).`,
+      exitCode: 0,
+    };
+  }
+
+  const runPrSubmissionFn = opts.runPrSubmission ?? defaultRunPrSubmission;
+  try {
+    const prResult = await runPrSubmissionFn({
+      ghRepo: opts.ghRepo,
+      branch: opts.branch,
+      baseBranch: opts.baseBranch,
+      parentNumber: opts.parentNumber,
+      parentTitle: opts.parentTitle,
+      repoRoot: opts.repoRoot,
+      config: opts.config,
+      sandboxEnv: opts.sandboxEnv,
+    });
+    return {
+      outcome: { kind: "opened", url: prResult.url },
+      outroMessage: `Done. ${completedSummary}. PR opened: ${prResult.url}`,
+      exitCode: 0,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      outcome: { kind: "failed", message },
+      outroMessage: `Done. ${completedSummary}, but PR submission failed.`,
+      exitCode: 1,
+    };
+  }
+}
+
 /**
  * Ensure that Sandcastle's hardcoded `.sandcastle/` directory points at the
  * tide-conventional `.tide/`. Sandcastle writes worktrees and logs under
@@ -307,6 +382,15 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     return 0;
   }
 
+  // Pre-flight opt-out for the tail PR step. Captured here (not at the tail)
+  // so the run remains autonomous after kickoff. Cancelling the prompt is
+  // treated like answering "no".
+  const prCreationAnswer = await confirm({
+    message: "Create a PR at the end?",
+    initialValue: true,
+  });
+  const prCreationConfirmed = !isCancel(prCreationAnswer) && prCreationAnswer;
+
   const orderedForRunner = result.order.map((n) => ({
     number: n,
     title: titlesByNumber.get(n) ?? `#${String(n)}`,
@@ -335,33 +419,27 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     return 1;
   }
 
-  // Queue succeeded — submit a PR for the branch against the base branch the
-  // user was on at invocation. Sub-issue #8 of PRD #7: foundation tracer
-  // (placeholder body, "opened" path only).
-  const runPrSubmissionFn = options.runPrSubmission ?? defaultRunPrSubmission;
-  let prResult: PrSubmissionResult;
-  try {
-    prResult = await runPrSubmissionFn({
-      ghRepo,
-      branch: linear.branchName,
-      baseBranch,
-      parentNumber: picked.root.number,
-      parentTitle: picked.root.title,
-      repoRoot,
-      config,
-      sandboxEnv,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log.error(msg);
-    outro(
-      `Done. Completed ${String(runResult.completed)} issue(s) on ${linear.branchName}, but PR submission failed.`
-    );
-    return 1;
-  }
+  // Queue succeeded — hand the post-queue decision to the tail-step helper,
+  // which gates on the pre-flight PR confirm and (if confirmed) invokes the
+  // PR-submission module. The helper returns the outro message + exit code
+  // so opt-out, opened, and failed paths render uniformly here.
+  const tail = await runPrTailStep({
+    prCreationConfirmed,
+    ghRepo,
+    branch: linear.branchName,
+    baseBranch,
+    parentNumber: picked.root.number,
+    parentTitle: picked.root.title,
+    repoRoot,
+    config,
+    sandboxEnv,
+    completedCount: runResult.completed,
+    runPrSubmission: options.runPrSubmission,
+  });
 
-  outro(
-    `Done. Completed ${String(runResult.completed)} issue(s) on ${linear.branchName}. PR opened: ${prResult.url}`
-  );
-  return 0;
+  if (tail.outcome.kind === "failed") {
+    log.error(tail.outcome.message);
+  }
+  outro(tail.outroMessage);
+  return tail.exitCode;
 }
