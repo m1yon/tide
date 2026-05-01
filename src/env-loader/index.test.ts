@@ -158,4 +158,19 @@ describe("env-loader", () => {
       /\/x\/\.tide\/\.env/
     );
   });
+
+  test("GH_TOKEN in .tide/.env is rejected with a hint that tide manages the key", () => {
+    writeEnv("LINEAR_API_KEY=lk\nANTHROPIC_API_KEY=ak\nGH_TOKEN=ghp_xxx\n");
+    let err: unknown = null;
+    try {
+      loadEnv({ repoRoot });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    expect(msg).toContain("GH_TOKEN");
+    expect(msg).toContain("tide manages this");
+    expect(msg).toContain(".tide/.env");
+  });
 });

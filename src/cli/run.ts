@@ -40,6 +40,10 @@ import {
   type GetGhIdentityOptions,
   type GhIdentity,
 } from "../gh-identity/index.ts";
+import {
+  getGhToken as defaultGetGhToken,
+  type GetGhTokenOptions,
+} from "../gh-token/index.ts";
 import type { ParentForLinear } from "../linear/index.ts";
 import {
   countCommitsAhead as defaultCountCommitsAhead,
@@ -63,6 +67,8 @@ export interface RunOptions {
   build?: (options: BuildOptions) => Promise<number>;
   /** gh-identity resolver. Tests stub this to avoid spawning `gh`. */
   getGhIdentity?: (options: GetGhIdentityOptions) => Promise<GhIdentity>;
+  /** gh-token resolver. Tests stub this to avoid spawning `gh`. */
+  getGhToken?: (options: GetGhTokenOptions) => Promise<string>;
   /** Triage-tree fetcher. Tests stub this to avoid hitting GitHub. */
   fetchTriageTree?: (ghRepo: GhRepo) => Promise<TreeNode[]>;
   /**
@@ -231,6 +237,7 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   const stderr = options.stderr ?? ((s: string) => process.stderr.write(s));
   const build = options.build ?? defaultBuild;
   const getGhIdentity = options.getGhIdentity ?? defaultGetGhIdentity;
+  const getGhToken = options.getGhToken ?? defaultGetGhToken;
   const fetchTriageTree = options.fetchTriageTree ?? defaultFetchTriageTree;
 
   let repoRoot: string;
@@ -293,6 +300,18 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   let ghRepo: GhRepo;
   try {
     ghRepo = await getGhIdentity({ repoRoot });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr(`${msg}\n`);
+    return 1;
+  }
+
+  // Fetch the host's GitHub token and inject it into the sandbox so the
+  // agent's in-sandbox `gh` calls (issue close, future PR-create) are
+  // authenticated. Run before the docker build so missing auth fails fast.
+  // See ADR 0003 for the rationale.
+  try {
+    sandboxEnv.GH_TOKEN = await getGhToken({ repoRoot });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
