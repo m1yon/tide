@@ -48,4 +48,4 @@ Here are the last 10 RALPH commits:
 
 # Ending the iteration
 
-Emit `<promise>COMPLETE</promise>` when this sub-issue is fully done (committed and closed). The runner will then move on to the next sub-issue in dependency order.
+Emit `<promise>COMPLETE</promise>` when this sub-issue is fully done (committed and closed), or when it failed to complete (blocked, unfixable failure, etc.) — in the failure case, leave a comment on the issue but do not close it. The runner will then move on to the next sub-issue in dependency order.
