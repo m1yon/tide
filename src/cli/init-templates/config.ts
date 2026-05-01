@@ -11,7 +11,7 @@ export default {
   // Optional. Bind-mount host paths into the docker sandbox.
   // sandbox: {
   //   mounts: [
-  //     // { hostPath: "/Users/me/.aws", containerPath: "/root/.aws", readOnly: true },
+  //     // { hostPath: "/Users/me/.aws", sandboxPath: "/root/.aws", readOnly: true },
   //   ],
   // },
 

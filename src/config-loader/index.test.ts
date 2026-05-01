@@ -41,7 +41,7 @@ describe("config-loader", () => {
         linear: { team: "ENG" },
         sandbox: {
           mounts: [
-            { hostPath: "/h", sandboxPath: "/s", readonly: true },
+            { hostPath: "/h", sandboxPath: "/s", readOnly: true },
           ],
         },
         hooks: {

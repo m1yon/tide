@@ -4,15 +4,20 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
 /**
- * Mount descriptor matching @ai-hero/sandcastle's `MountConfig`.
- * Kept duplicated here (rather than importing from sandcastle) so config-loader
- * can be unit-tested without pulling the SDK into the test graph.
+ * Mount descriptor. Public field is `readOnly` (camelCase); we transform to
+ * sandcastle's lowercase `readonly` before passing to the SDK.
  */
-const MountConfigSchema = z.strictObject({
-  hostPath: z.string().min(1),
-  sandboxPath: z.string().min(1),
-  readonly: z.boolean().optional(),
-});
+const MountConfigSchema = z
+  .strictObject({
+    hostPath: z.string().min(1),
+    sandboxPath: z.string().min(1),
+    readOnly: z.boolean().optional(),
+  })
+  .transform(({ hostPath, sandboxPath, readOnly }) => ({
+    hostPath,
+    sandboxPath,
+    ...(readOnly === undefined ? {} : { readonly: readOnly }),
+  }));
 
 const HookSchema = z.strictObject({
   command: z.string().min(1),
