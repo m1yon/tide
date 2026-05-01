@@ -19,6 +19,15 @@ export const CLAUDE_AUTH_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
 
+/**
+ * Keys that tide manages itself and the user must not set in `.tide/.env`.
+ *
+ * `GH_TOKEN` is fetched host-side from `gh auth token` and injected into the
+ * sandbox by tide (see ADR 0003). Allowing the user to override it would
+ * introduce a second source that drifts on rotation.
+ */
+export const FORBIDDEN_ENV_KEYS = ["GH_TOKEN"] as const;
+
 export interface LoadEnvOptions {
   /** Repo root containing `.tide/.env`. */
   repoRoot: string;
@@ -46,6 +55,7 @@ export function loadEnv(options: LoadEnvOptions): Record<string, string> {
 
   const missing = REQUIRED_ENV_KEYS.filter((k) => !(k in env));
   const hasAuth = CLAUDE_AUTH_KEYS.some((k) => k in env);
+  const forbidden = FORBIDDEN_ENV_KEYS.filter((k) => k in env);
 
   const errors: string[] = [];
   if (missing.length > 0) {
@@ -56,6 +66,11 @@ export function loadEnv(options: LoadEnvOptions): Record<string, string> {
   if (!hasAuth) {
     errors.push(
       `tide: ${envPath} must define ${CLAUDE_AUTH_KEYS.join(" or ")}`
+    );
+  }
+  for (const key of forbidden) {
+    errors.push(
+      `tide: ${envPath} sets ${key}; tide manages this — remove it from .tide/.env`
     );
   }
   if (errors.length > 0) {

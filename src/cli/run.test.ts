@@ -37,6 +37,13 @@ function makeGhIdentity(log: CallLog) {
   };
 }
 
+function makeGhToken(log: CallLog) {
+  return (): Promise<string> => {
+    log.events.push("getGhToken");
+    return Promise.resolve("ghp_test");
+  };
+}
+
 interface FetchStub {
   tree: TreeNode[];
   calls: GhRepo[];
@@ -129,6 +136,7 @@ describe("tide run — build step", () => {
       stderr: captureStderr,
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
       fetchTriageTree: makeFetchTriageTree(fetchStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
@@ -153,6 +161,7 @@ describe("tide run — build step", () => {
       stderr: captureStderr,
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
       fetchTriageTree: makeFetchTriageTree(fetchStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
@@ -175,6 +184,7 @@ describe("tide run — build step", () => {
       stderr: captureStderr,
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
       fetchTriageTree: makeFetchTriageTree(fetchStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
@@ -195,6 +205,7 @@ describe("tide run — build step", () => {
       stderr: captureStderr,
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
       fetchTriageTree: makeFetchTriageTree(fetchStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
@@ -216,6 +227,7 @@ describe("tide run — build step", () => {
       stderr: captureStderr,
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
       fetchTriageTree: makeFetchTriageTree(fetchStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
@@ -224,6 +236,58 @@ describe("tide run — build step", () => {
     const buildIdx = log.events.indexOf("build");
     expect(ghIdx).toBeGreaterThanOrEqual(0);
     expect(buildIdx).toBeGreaterThan(ghIdx);
+  });
+
+  test("getGhToken runs after gh-identity and before docker build", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const fetchStub: FetchStub = { tree: [], calls: [] };
+
+    await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: () => {
+        log.events.push("getGhToken");
+        return Promise.resolve("ghp_test");
+      },
+      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    const ghIdx = log.events.indexOf("getGhIdentity");
+    const tokenIdx = log.events.indexOf("getGhToken");
+    const buildIdx = log.events.indexOf("build");
+    expect(ghIdx).toBeGreaterThanOrEqual(0);
+    expect(tokenIdx).toBeGreaterThan(ghIdx);
+    expect(buildIdx).toBeGreaterThan(tokenIdx);
+  });
+
+  test("getGhToken failure short-circuits before build", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const fetchStub: FetchStub = { tree: [], calls: [] };
+
+    const code = await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: () =>
+        Promise.reject(
+          new Error("tide: `gh auth token` failed. Run `gh auth login`")
+        ),
+      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(code).toBe(1);
+    expect(buildStub.calls).toHaveLength(0);
+    expect(fetchStub.calls).toHaveLength(0);
+    expect(stderrChunks.join("")).toContain("gh auth login");
   });
 });
 
