@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { PaginationOrderBy } from "@linear/sdk";
 import {
   SETUP_LABEL_NAMES,
+  fetchIssueContent,
+  fetchSubIssues,
   listPRDs,
   pickWorkflowStateByType,
   setupLabels,
   type LinearContext,
+  type LinearGqlRequest,
   type ListPRDsClient,
   type ListPRDsIssueFilter,
   type SetupLabelsClient,
@@ -443,5 +446,199 @@ describe("linear.listPRDs", () => {
     });
     const prds = await listPRDs(ctx, stub.client);
     expect(prds[0]?.state).toBe("");
+  });
+});
+
+interface GqlCall {
+  query: string;
+  variables: Record<string, unknown>;
+}
+
+function makeGqlStub(handler: (call: GqlCall) => unknown): {
+  request: LinearGqlRequest;
+  calls: GqlCall[];
+} {
+  const calls: GqlCall[] = [];
+  const request: LinearGqlRequest = <Data>(
+    query: string,
+    variables?: Record<string, unknown>
+  ) => {
+    const call = { query, variables: variables ?? {} };
+    calls.push(call);
+    return Promise.resolve(handler(call) as Data);
+  };
+  return { request, calls };
+}
+
+describe("linear.fetchSubIssues", () => {
+  test("returns each direct child with identifier, title, state, labels, and blockedBy identifiers", async () => {
+    const stub = makeGqlStub(() => ({
+      issue: {
+        children: {
+          nodes: [
+            {
+              id: "uuid-1",
+              identifier: "ENG-10",
+              title: "Implement parser",
+              state: { name: "In Progress", type: "started" },
+              labels: {
+                nodes: [{ name: "ready-for-agent" }, { name: "backend" }],
+              },
+              inverseRelations: { nodes: [] },
+            },
+            {
+              id: "uuid-2",
+              identifier: "ENG-11",
+              title: "Wire CLI",
+              state: { name: "Backlog", type: "backlog" },
+              labels: { nodes: [{ name: "ready-for-agent" }] },
+              inverseRelations: {
+                nodes: [
+                  { type: "blocks", issue: { identifier: "ENG-10" } },
+                  { type: "related", issue: { identifier: "ENG-99" } },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    }));
+
+    const subs = await fetchSubIssues(ctx, "prd-uuid", stub.request);
+
+    expect(subs).toHaveLength(2);
+    const a = subs[0];
+    const b = subs[1];
+    if (!a || !b) throw new Error("unreachable");
+
+    expect(a.id).toBe("uuid-1");
+    expect(a.identifier).toBe("ENG-10");
+    expect(a.title).toBe("Implement parser");
+    expect(a.state).toBe("In Progress");
+    expect(a.stateType).toBe("started");
+    expect(a.labels.sort()).toEqual(["backend", "ready-for-agent"]);
+    expect(a.blockedBy).toEqual([]);
+
+    expect(b.identifier).toBe("ENG-11");
+    // Only `blocks`-type relations populate `blockedBy`. The `related`
+    // relation to ENG-99 must be filtered out.
+    expect(b.blockedBy).toEqual(["ENG-10"]);
+  });
+
+  test("queries with the PRD's UUID as the `id` variable", async () => {
+    const stub = makeGqlStub(() => ({
+      issue: { children: { nodes: [] } },
+    }));
+
+    await fetchSubIssues(ctx, "the-prd-uuid", stub.request);
+
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]?.variables).toEqual({ id: "the-prd-uuid" });
+  });
+
+  test("returns an empty list when the PRD has no children", async () => {
+    const stub = makeGqlStub(() => ({
+      issue: { children: { nodes: [] } },
+    }));
+    const subs = await fetchSubIssues(ctx, "lonely-prd", stub.request);
+    expect(subs).toEqual([]);
+  });
+
+  test("throws when the PRD id does not resolve", async () => {
+    const stub = makeGqlStub(() => ({ issue: null }));
+    let caught: unknown = null;
+    try {
+      await fetchSubIssues(ctx, "missing-uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(
+      /PRD with id "missing-uuid" not found/
+    );
+  });
+
+  test("falls back gracefully when state is null", async () => {
+    const stub = makeGqlStub(() => ({
+      issue: {
+        children: {
+          nodes: [
+            {
+              id: "uuid-x",
+              identifier: "ENG-99",
+              title: "no state",
+              state: null,
+              labels: { nodes: [] },
+              inverseRelations: { nodes: [] },
+            },
+          ],
+        },
+      },
+    }));
+    const subs = await fetchSubIssues(ctx, "prd", stub.request);
+    expect(subs[0]?.state).toBe("");
+    expect(subs[0]?.stateType).toBe("");
+  });
+});
+
+describe("linear.fetchIssueContent", () => {
+  test("returns the issue's identifier, title, body, and comment bodies", async () => {
+    const stub = makeGqlStub(() => ({
+      issue: {
+        identifier: "ENG-7",
+        title: "Wire authentication",
+        description: "Integrate the new auth provider.",
+        comments: {
+          nodes: [{ body: "Spec looks good." }, { body: "Will start today." }],
+        },
+      },
+    }));
+
+    const content = await fetchIssueContent(ctx, "uuid-7", stub.request);
+
+    expect(content.identifier).toBe("ENG-7");
+    expect(content.title).toBe("Wire authentication");
+    expect(content.body).toBe("Integrate the new auth provider.");
+    expect(content.comments).toEqual(["Spec looks good.", "Will start today."]);
+  });
+
+  test("queries with the issue's UUID as the `id` variable", async () => {
+    const stub = makeGqlStub(() => ({
+      issue: {
+        identifier: "ENG-1",
+        title: "x",
+        description: "",
+        comments: { nodes: [] },
+      },
+    }));
+    await fetchIssueContent(ctx, "issue-uuid", stub.request);
+    expect(stub.calls[0]?.variables).toEqual({ id: "issue-uuid" });
+  });
+
+  test("renders an empty body when description is null", async () => {
+    const stub = makeGqlStub(() => ({
+      issue: {
+        identifier: "ENG-2",
+        title: "x",
+        description: null,
+        comments: { nodes: [] },
+      },
+    }));
+    const content = await fetchIssueContent(ctx, "uuid-2", stub.request);
+    expect(content.body).toBe("");
+  });
+
+  test("throws when the issue id does not resolve", async () => {
+    const stub = makeGqlStub(() => ({ issue: null }));
+    let caught: unknown = null;
+    try {
+      await fetchIssueContent(ctx, "missing-uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(
+      /issue with id "missing-uuid" not found/
+    );
   });
 });

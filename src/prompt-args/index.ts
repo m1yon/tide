@@ -1,12 +1,12 @@
 // Pure module: render the per-issue `promptArgs` record for a `run()` call.
 //
 // The six keys correspond to `{{KEY}}` placeholders in `.tide/prompt.md`:
-//   - ISSUE_ID:      the GitHub issue number (plain integer)
+//   - ISSUE_ID:      the Linear identifier of the sub-issue (e.g. "ENG-7")
 //   - ISSUE_TITLE:   the issue's title string
 //   - ISSUE_CONTENT: a markdown block with `Title`, `Body`, and `Comments`
 //                    sub-sections (Comments omitted if there are none)
-//   - PRD_CONTENT:   the parent issue's raw markdown body
-//   - PARENT_ID:     the parent issue's number (plain integer)
+//   - PRD_CONTENT:   the parent PRD's raw markdown body
+//   - PARENT_ID:     the parent PRD's Linear identifier (e.g. "ENG-1")
 //   - BRANCH:        the Linear-derived branch name (used verbatim)
 //
 // Markdown special characters in body / comments pass through unmodified
@@ -14,7 +14,7 @@
 // placeholder so the structure is stable across issues.
 
 export interface IssueContent {
-  number: number;
+  identifier: string;
   title: string;
   body: string;
   comments: string[];
@@ -57,11 +57,11 @@ function renderIssueContent(issue: IssueContent): string {
 export function buildPromptArgs(input: BuildPromptArgsInput): PromptArgsRecord {
   const { issue, parent, branch } = input;
   return {
-    ISSUE_ID: issue.number,
+    ISSUE_ID: issue.identifier,
     ISSUE_TITLE: issue.title,
     ISSUE_CONTENT: renderIssueContent(issue),
     PRD_CONTENT: parent.body,
-    PARENT_ID: parent.number,
+    PARENT_ID: parent.identifier,
     BRANCH: branch,
   };
 }

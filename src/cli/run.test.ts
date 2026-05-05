@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPrTailStep, tideRun } from "./run.ts";
+import { buildOrderedQueue, runPrTailStep, tideRun } from "./run.ts";
 import type { BuildOptions } from "./build.ts";
 import type { GhIdentity } from "../gh-identity/index.ts";
-import type { LinearContext, PRD } from "../linear/index.ts";
+import type { LinearContext, PRD, SubIssue } from "../linear/index.ts";
 import type {
   PrSubmissionResult,
   ShellResult,
@@ -75,6 +75,7 @@ function makePickPRD(stub: PickPRDStub, log: CallLog) {
 
 function makePRD(overrides: Partial<PRD> = {}): PRD {
   return {
+    id: "uuid-eng-1",
     identifier: "ENG-1",
     title: "Example PRD",
     state: "Backlog",
@@ -83,6 +84,19 @@ function makePRD(overrides: Partial<PRD> = {}): PRD {
     updatedAt: new Date("2026-04-01T00:00:00Z"),
     readyForAgentCount: 2,
     readyForHumanCount: 0,
+    ...overrides,
+  };
+}
+
+function makeSubIssue(overrides: Partial<SubIssue> = {}): SubIssue {
+  return {
+    id: "uuid-default",
+    identifier: "ENG-100",
+    title: "Default sub-issue",
+    state: "Backlog",
+    stateType: "backlog",
+    labels: ["ready-for-agent"],
+    blockedBy: [],
     ...overrides,
   };
 }
@@ -246,7 +260,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     expect(pickStub.calls).toBe(0);
   });
 
-  test("non-empty PRD list invokes pickPRD and exits cleanly with `Selected: <PRD>`", async () => {
+  test("non-empty PRD list invokes pickPRD and dispatches the picked PRD to runQueueAfterPick", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = {
@@ -257,6 +271,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       calls: [],
     };
     const pickStub: PickPRDStub = { pickIndex: 1, calls: 0 };
+    const queueCalls: PRD[] = [];
 
     const code = await tideRun({
       repoRoot,
@@ -267,21 +282,24 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       pickPRD: makePickPRD(pickStub, log),
+      runQueueAfterPick: (opts) => {
+        log.events.push("runQueueAfterPick");
+        queueCalls.push(opts.picked);
+        return Promise.resolve(0);
+      },
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
     expect(code).toBe(0);
     expect(pickStub.calls).toBe(1);
+    // The post-pick orchestration is invoked exactly once with the picked PRD.
+    expect(queueCalls).toHaveLength(1);
+    expect(queueCalls[0]?.identifier).toBe("ENG-8");
 
     const pickIdx = log.events.indexOf("pickPRD");
-    const listIdx = log.events.indexOf("listPRDs");
-    expect(listIdx).toBeGreaterThanOrEqual(0);
-    expect(pickIdx).toBeGreaterThan(listIdx);
-
-    // No queue or PR-tail step events fire — those are out of scope for this
-    // slice. (The sentinel here is that no other events appear after pickPRD.)
-    const eventsAfterPick = log.events.slice(pickIdx + 1);
-    expect(eventsAfterPick).toEqual([]);
+    const queueIdx = log.events.indexOf("runQueueAfterPick");
+    expect(pickIdx).toBeGreaterThanOrEqual(0);
+    expect(queueIdx).toBeGreaterThan(pickIdx);
   });
 
   test("listPRDs receives the LINEAR_API_KEY and team key from config", async () => {
@@ -616,5 +634,171 @@ describe("runPrTailStep", () => {
     }
     expect(result.exitCode).toBe(1);
     expect(result.outroMessage).toContain("PR submission failed");
+  });
+});
+
+describe("buildOrderedQueue", () => {
+  test("returns a queue with `ready-for-agent` direct children topo-sorted by blockedBy", () => {
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        id: "uuid-2",
+        identifier: "ENG-2",
+        title: "Second",
+        blockedBy: ["ENG-1"],
+      }),
+      makeSubIssue({
+        id: "uuid-1",
+        identifier: "ENG-1",
+        title: "First",
+        blockedBy: [],
+      }),
+      makeSubIssue({
+        id: "uuid-3",
+        identifier: "ENG-3",
+        title: "Third",
+        blockedBy: ["ENG-2"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("queue");
+    if (r.kind === "queue") {
+      expect(r.ordered.map((o) => o.identifier)).toEqual([
+        "ENG-1",
+        "ENG-2",
+        "ENG-3",
+      ]);
+      // The internal UUID is preserved on each ordered entry so the runner
+      // can fetch content by id without re-resolving.
+      expect(r.ordered.map((o) => o.id)).toEqual([
+        "uuid-1",
+        "uuid-2",
+        "uuid-3",
+      ]);
+    }
+  });
+
+  test("filters out direct children that lack the `ready-for-agent` label", () => {
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        id: "uuid-1",
+        identifier: "ENG-1",
+        labels: ["ready-for-agent"],
+      }),
+      makeSubIssue({
+        id: "uuid-h",
+        identifier: "ENG-2",
+        labels: ["ready-for-human"],
+      }),
+      makeSubIssue({
+        id: "uuid-u",
+        identifier: "ENG-3",
+        labels: [],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("queue");
+    if (r.kind === "queue") {
+      expect(r.ordered.map((o) => o.identifier)).toEqual(["ENG-1"]);
+    }
+  });
+
+  test("returns standalone when no direct children carry `ready-for-agent`", () => {
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        identifier: "ENG-X",
+        labels: ["ready-for-human"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("standalone");
+  });
+
+  test("returns standalone when there are zero direct children at all", () => {
+    const r = buildOrderedQueue([]);
+    expect(r.kind).toBe("standalone");
+  });
+
+  test("treats terminal-state direct-child blockers as satisfied", () => {
+    // ENG-2 (in scope) is blocked by ENG-1 (a direct child of the PRD that
+    // has been completed). The queue should run ENG-2 anyway.
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        identifier: "ENG-1",
+        labels: [],
+        stateType: "completed",
+      }),
+      makeSubIssue({
+        identifier: "ENG-2",
+        labels: ["ready-for-agent"],
+        blockedBy: ["ENG-1"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("queue");
+    if (r.kind === "queue") {
+      expect(r.ordered.map((o) => o.identifier)).toEqual(["ENG-2"]);
+    }
+  });
+
+  test("errors with the cross-PRD message shape when blockedBy is outside the picked PRD's children", () => {
+    // ENG-2 (in scope) is blocked by ENG-99, which is not a direct child of
+    // the picked PRD. The queue should refuse to run with an error message
+    // mirroring the GitHub-path's "outside the selected parent's subtree"
+    // wording.
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        identifier: "ENG-2",
+        labels: ["ready-for-agent"],
+        blockedBy: ["ENG-99"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.message).toContain("ENG-2");
+      expect(r.message).toContain("ENG-99");
+      expect(r.message).toContain("outside the picked PRD's children");
+      expect(r.message).toContain("Resolve");
+    }
+  });
+
+  test("errors with a cycle message when scoped sub-issues form a cycle", () => {
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        identifier: "ENG-1",
+        labels: ["ready-for-agent"],
+        blockedBy: ["ENG-2"],
+      }),
+      makeSubIssue({
+        identifier: "ENG-2",
+        labels: ["ready-for-agent"],
+        blockedBy: ["ENG-1"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.message).toContain("cycle");
+      expect(r.message).toMatch(/ENG-1.*ENG-2|ENG-2.*ENG-1/s);
+    }
+  });
+
+  test("excludes sub-issues already in a terminal state from the queue", () => {
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        identifier: "ENG-1",
+        labels: ["ready-for-agent"],
+        stateType: "completed",
+      }),
+      makeSubIssue({
+        identifier: "ENG-2",
+        labels: ["ready-for-agent"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("queue");
+    if (r.kind === "queue") {
+      expect(r.ordered.map((o) => o.identifier)).toEqual(["ENG-2"]);
+    }
   });
 });

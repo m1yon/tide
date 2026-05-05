@@ -3,6 +3,11 @@
 //     both `prd` and `ready-for-agent` labels and is in a non-terminal
 //     workflow state. Each entry carries the count of its direct sub-issues
 //     split by `ready-for-agent` / `ready-for-human` label.
+//   - fetchSubIssues(ctx, prdId): direct Linear children of a given PRD, with
+//     identifier, title, workflow state, label set, and blockedBy relations.
+//   - fetchIssueContent(ctx, issueId): the issue's description (markdown
+//     body) and the bodies of its comments. Used to hydrate per-iteration
+//     prompt args.
 //   - setupLabels(ctx): idempotently ensure the three canonical labels exist
 //     on the configured team. Used by the `tide setup` subcommand.
 //   - pickWorkflowStateByType(states, type): pure helper. Given a set of
@@ -47,6 +52,8 @@ export interface SetupLabelResult {
 }
 
 export interface PRD {
+  /** Linear's internal UUID for the PRD issue. */
+  id: string;
   identifier: string;
   title: string;
   /** Workflow-state name (e.g. "In Progress"). */
@@ -195,6 +202,7 @@ export async function listPRDs(
       }),
     ]);
     prds.push({
+      id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
       state:
@@ -292,4 +300,184 @@ export async function setupLabels(
     results.push({ name, created: true });
   }
   return results;
+}
+
+/**
+ * Pure GraphQL transport seam used by `fetchSubIssues` / `fetchIssueContent`.
+ * Production callers omit this and the implementation wraps the SDK client's
+ * underlying `request` (which posts a GraphQL document and returns the
+ * parsed `data` payload). Tests provide a stub that returns canned data.
+ */
+export type LinearGqlRequest = <Data = unknown>(
+  query: string,
+  variables?: Record<string, unknown>
+) => Promise<Data>;
+
+function rawRequest(apiKey: string): LinearGqlRequest {
+  const c = client(apiKey);
+  return <Data>(query: string, variables?: Record<string, unknown>) =>
+    c.client.request<Data, Record<string, unknown>>(query, variables ?? {});
+}
+
+export interface SubIssue {
+  /** Linear's internal UUID. */
+  id: string;
+  /** Human-readable identifier (e.g. "ENG-123"). */
+  identifier: string;
+  title: string;
+  /** Workflow-state name (e.g. "In Progress"). */
+  state: string;
+  /** Workflow-state type (e.g. "started", "completed"). */
+  stateType: string;
+  /** Label names attached to the issue. */
+  labels: string[];
+  /** Identifiers of issues that block this one (only `blocks`-type relations). */
+  blockedBy: string[];
+}
+
+const SUB_ISSUES_QUERY = /* GraphQL */ `
+  query TideSubIssues($id: String!) {
+    issue(id: $id) {
+      id
+      children(first: 250) {
+        nodes {
+          id
+          identifier
+          title
+          state {
+            name
+            type
+          }
+          labels(first: 50) {
+            nodes {
+              name
+            }
+          }
+          inverseRelations(first: 50) {
+            nodes {
+              type
+              issue {
+                identifier
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+interface SubIssueGqlNode {
+  id: string;
+  identifier: string;
+  title: string;
+  state: { name: string; type: string } | null;
+  labels: { nodes: { name: string }[] };
+  inverseRelations: {
+    nodes: {
+      type: string;
+      issue: { identifier: string } | null;
+    }[];
+  };
+}
+
+/**
+ * Fetch the direct Linear children of `prdId` (an issue UUID). Each entry
+ * carries the data the runner needs to topo-sort and dispatch: identifier,
+ * title, workflow-state name + type, label names, and `blockedBy`
+ * identifiers. Only relations of type `"blocks"` populate `blockedBy`;
+ * `"related"` and `"duplicate"` are ignored.
+ *
+ * Throws when the PRD id does not resolve. Sub-issues whose blocker
+ * relation lacks an issue payload (deleted source) are skipped.
+ *
+ * `_request` is a test seam — production callers omit it.
+ */
+export async function fetchSubIssues(
+  ctx: LinearContext,
+  prdId: string,
+  _request?: LinearGqlRequest
+): Promise<SubIssue[]> {
+  const request = _request ?? rawRequest(ctx.apiKey);
+  const data = await request<{
+    issue: { children: { nodes: SubIssueGqlNode[] } } | null;
+  }>(SUB_ISSUES_QUERY, { id: prdId });
+  if (!data.issue) {
+    throw new Error(`Linear PRD with id "${prdId}" not found.`);
+  }
+  return data.issue.children.nodes.map((n) => ({
+    id: n.id,
+    identifier: n.identifier,
+    title: n.title,
+    state: n.state?.name ?? "",
+    stateType: n.state?.type ?? "",
+    labels: n.labels.nodes.map((l) => l.name),
+    blockedBy: n.inverseRelations.nodes
+      .filter((r) => r.type === "blocks" && r.issue !== null)
+      .map((r) => {
+        if (r.issue === null) throw new Error("unreachable");
+        return r.issue.identifier;
+      }),
+  }));
+}
+
+export interface LinearIssueContent {
+  identifier: string;
+  title: string;
+  /** Markdown body (Linear's `description`). */
+  body: string;
+  /** Comment bodies in chronological order. */
+  comments: string[];
+}
+
+const ISSUE_CONTENT_QUERY = /* GraphQL */ `
+  query TideIssueContent($id: String!) {
+    issue(id: $id) {
+      identifier
+      title
+      description
+      comments(first: 100) {
+        nodes {
+          body
+        }
+      }
+    }
+  }
+`;
+
+interface IssueContentGqlNode {
+  identifier: string;
+  title: string;
+  description: string | null;
+  comments: { nodes: { body: string }[] };
+}
+
+/**
+ * Fetch a single Linear issue's body and comments by UUID. Used by the
+ * runner to hydrate per-iteration prompt args for both the in-scope
+ * sub-issue and the parent PRD.
+ *
+ * Throws when the issue id does not resolve.
+ *
+ * `_request` is a test seam — production callers omit it.
+ */
+export async function fetchIssueContent(
+  ctx: LinearContext,
+  issueId: string,
+  _request?: LinearGqlRequest
+): Promise<LinearIssueContent> {
+  const request = _request ?? rawRequest(ctx.apiKey);
+  const data = await request<{ issue: IssueContentGqlNode | null }>(
+    ISSUE_CONTENT_QUERY,
+    { id: issueId }
+  );
+  if (!data.issue) {
+    throw new Error(`Linear issue with id "${issueId}" not found.`);
+  }
+  return {
+    identifier: data.issue.identifier,
+    title: data.issue.title,
+    body: data.issue.description ?? "",
+    comments: data.issue.comments.nodes.map((c) => c.body),
+  };
 }

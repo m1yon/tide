@@ -1,24 +1,35 @@
-// `tide run` — Linear-native PRD selector.
+// `tide run` — Linear-native PRD-rooted runner.
 //
 // Steps:
 //   1. discover repo root → capture base branch (fail fast on detached HEAD)
-//      → load config + env → resolve gh identity
-//   2. build sandbox image
-//   3. fetch the team's PRDs from Linear (filter: prd + ready-for-agent
-//      labels, non-terminal state.type)
-//   4. clack-select a PRD; print `Selected: <identifier>` and exit
+//      → load config + env → resolve gh identity + token → build sandbox image
+//   2. fetch the team's PRDs from Linear (filter: prd + ready-for-agent
+//      labels, non-terminal state.type) and clack-select a PRD
+//   3. fetch the picked PRD's direct sub-issues from Linear, build the
+//      ordered queue (filter to `ready-for-agent`, topo-sort by `blockedBy`,
+//      or fall back to a one-iteration standalone path)
+//   4. preflight summary + Y/n confirms, then run the queue
+//   5. push the feature branch and open a PR (or skip cleanly)
 //
-// Queue execution and the PR submission tail step are out of scope for this
-// slice — `runPrTailStep` is preserved (and tested) as a stable seam for the
-// later slice that will wire the queue back in.
+// No Linear writes happen from the host yet — sub-issues stay in their
+// original workflow state throughout. State transitions and the summarizer
+// are introduced in later slices.
 
 import { existsSync, lstatSync, mkdirSync, symlinkSync } from "node:fs";
 import path from "node:path";
-import { intro, outro, spinner, log } from "@clack/prompts";
+import {
+  intro,
+  outro,
+  spinner,
+  log,
+  confirm,
+  isCancel,
+  cancel,
+} from "@clack/prompts";
 import { build as defaultBuild, type BuildOptions } from "./build.ts";
 import { loadConfig, type TideConfig } from "../config-loader/index.ts";
+import { type DepNode, topoSort } from "../dep-graph/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
-import type { GhRepo } from "../github/index.ts";
 import {
   getGhIdentity as defaultGetGhIdentity,
   type GetGhIdentityOptions,
@@ -28,10 +39,13 @@ import {
   getGhToken as defaultGetGhToken,
   type GetGhTokenOptions,
 } from "../gh-token/index.ts";
+import type { GhRepo } from "../github/index.ts";
 import {
+  fetchSubIssues as defaultFetchSubIssues,
   listPRDs as defaultListPRDs,
   type LinearContext,
   type PRD,
+  type SubIssue,
 } from "../linear/index.ts";
 import {
   countCommitsAhead as defaultCountCommitsAhead,
@@ -43,7 +57,16 @@ import {
   type SubIssueRef,
 } from "../pr-submission/index.ts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
+import {
+  runIssueQueue as defaultRunIssueQueue,
+  type OrderedIssue,
+  type RunIssueQueueOptions,
+  type RunIssueQueueResult,
+} from "../runner/index.ts";
 import { pickPRD as defaultPickPRD } from "../selector/index.ts";
+
+const READY_FOR_AGENT = "ready-for-agent";
+const TERMINAL_STATE_TYPES = new Set(["completed", "canceled"]);
 
 export interface RunOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
@@ -61,11 +84,36 @@ export interface RunOptions {
   /** PRD selector prompt. Tests stub this to bypass the clack UI. */
   pickPRD?: (prds: readonly PRD[]) => Promise<PRD>;
   /**
+   * Test seam: post-pick orchestration (queue build + confirms + queue run +
+   * PR tail). Defaults to the in-module `runQueueAfterPick`.
+   */
+  runQueueAfterPick?: (opts: RunQueueAfterPickOptions) => Promise<number>;
+  /**
    * Test seam: shell runner used for the host-side base-branch capture
    * (`git rev-parse --abbrev-ref HEAD`). Defaults to a child_process spawn
    * inside the pr-submission module.
    */
   baseBranchShellRunner?: ShellRunner;
+}
+
+export interface RunQueueAfterPickOptions {
+  picked: PRD;
+  ghRepo: GhRepo;
+  baseBranch: string;
+  linearCtx: LinearContext;
+  repoRoot: string;
+  config: TideConfig;
+  sandboxEnv: Record<string, string>;
+  /** Test seam — defaults to `linear.fetchSubIssues`. */
+  fetchSubIssues?: (ctx: LinearContext, prdId: string) => Promise<SubIssue[]>;
+  /** Test seam — defaults to the runner module's `runIssueQueue`. */
+  runIssueQueue?: (opts: RunIssueQueueOptions) => Promise<RunIssueQueueResult>;
+  /** Test seam — defaults to the in-module `runPrTailStep`. */
+  runPrTailStep?: (opts: RunPrTailStepOptions) => Promise<PrTailStepResult>;
+  /** Test seam — clack `confirm` for "Run N issue(s)?". */
+  confirmRun?: (count: number, branch: string) => Promise<boolean>;
+  /** Test seam — clack `confirm` for "Create a PR at the end?". */
+  confirmPr?: () => Promise<boolean>;
 }
 
 export interface RunPrTailStepOptions {
@@ -103,6 +151,88 @@ export interface PrTailStepResult {
   outcome: PrTailOutcome;
   outroMessage: string;
   exitCode: 0 | 1;
+}
+
+export interface OrderedSubIssue {
+  /** Linear UUID. */
+  id: string;
+  identifier: string;
+  title: string;
+}
+
+export type BuildOrderedQueueResult =
+  | { kind: "queue"; ordered: OrderedSubIssue[] }
+  | { kind: "standalone" }
+  | { kind: "error"; message: string };
+
+/**
+ * Pure: turn the picked PRD's direct sub-issues into an ordered queue.
+ *
+ * - Filters to direct children carrying the `ready-for-agent` label.
+ * - If the filtered set is empty, returns `kind: "standalone"` — the caller
+ *   treats the PRD itself as the unit of work.
+ * - Closed (terminal-state) direct-child blockers are treated as satisfied.
+ * - A `blockedBy` reference outside the picked PRD's children surfaces as
+ *   an error mirroring the GitHub-path message shape.
+ * - A cycle among open scoped sub-issues surfaces as a cycle error.
+ */
+export function buildOrderedQueue(
+  subIssues: readonly SubIssue[]
+): BuildOrderedQueueResult {
+  const inScope = subIssues.filter((s) => s.labels.includes(READY_FOR_AGENT));
+  if (inScope.length === 0) {
+    return { kind: "standalone" };
+  }
+  const closedAmongDirectChildren = new Map(
+    subIssues.map(
+      (s) => [s.identifier, TERMINAL_STATE_TYPES.has(s.stateType)] as const
+    )
+  );
+
+  const nodes: DepNode[] = inScope.map((s) => {
+    const filtered = s.blockedBy.filter(
+      // Drop blockers that are direct children in a terminal state — those
+      // are satisfied. Any other blocker either is an in-scope sub-issue
+      // (handled by topoSort) or surfaces as an external-blocker error.
+      (b) => closedAmongDirectChildren.get(b) !== true
+    );
+    return {
+      id: s.identifier,
+      blockedBy: filtered,
+      closed: TERMINAL_STATE_TYPES.has(s.stateType),
+    };
+  });
+
+  const result = topoSort(nodes);
+  if (!result.ok) {
+    if (result.error.kind === "external-blocker") {
+      const { issue, blocker } = result.error;
+      return {
+        kind: "error",
+        message:
+          `Sub-issue ${issue} is blocked by ${blocker}, which is open and outside the picked PRD's children.\n` +
+          `Resolve by closing the blocker, removing the relationship, or expanding scope.`,
+      };
+    }
+    const edges = result.error.edges
+      .map((e) => `  ${e.from} -> ${e.to}`)
+      .join("\n");
+    return {
+      kind: "error",
+      message:
+        `Dependency graph contains a cycle. Offending edges:\n${edges}\n\n` +
+        "Resolve by removing one of the `blocked by` relationships in Linear, then re-run.",
+    };
+  }
+
+  const byIdentifier = new Map(inScope.map((s) => [s.identifier, s]));
+  const ordered: OrderedSubIssue[] = [];
+  for (const id of result.order) {
+    const sub = byIdentifier.get(id);
+    if (!sub) continue;
+    ordered.push({ id: sub.id, identifier: sub.identifier, title: sub.title });
+  }
+  return { kind: "queue", ordered };
 }
 
 /**
@@ -185,6 +315,150 @@ export async function runPrTailStep(
   }
 }
 
+async function defaultConfirmRun(
+  count: number,
+  branch: string
+): Promise<boolean> {
+  const answer = await confirm({
+    message: `Run ${String(count)} issue(s) on branch ${branch}?`,
+    initialValue: true,
+  });
+  if (isCancel(answer)) return false;
+  return answer;
+}
+
+async function defaultConfirmPr(): Promise<boolean> {
+  const answer = await confirm({
+    message: "Create a PR at the end?",
+    initialValue: true,
+  });
+  return !isCancel(answer) && answer;
+}
+
+/**
+ * Post-pick orchestration: fetch sub-issues, build the queue, run pre-flight
+ * confirms, run the queue, and dispatch to `runPrTailStep` for the PR step.
+ * Surfaced as a named export so tests can stub it for early-gate coverage
+ * and exercise it directly with stubs for orchestration coverage.
+ */
+export async function runQueueAfterPick(
+  opts: RunQueueAfterPickOptions
+): Promise<number> {
+  const fetchSubIssuesFn = opts.fetchSubIssues ?? defaultFetchSubIssues;
+  const runIssueQueueFn = opts.runIssueQueue ?? defaultRunIssueQueue;
+  const runPrTailStepFn = opts.runPrTailStep ?? runPrTailStep;
+  const confirmRunFn = opts.confirmRun ?? defaultConfirmRun;
+  const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
+
+  const subSpin = spinner();
+  subSpin.start("Fetching sub-issues from Linear");
+  let subIssues: SubIssue[];
+  try {
+    subIssues = await fetchSubIssuesFn(opts.linearCtx, opts.picked.id);
+  } catch (err) {
+    subSpin.stop("Linear sub-issue fetch failed");
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(msg);
+    outro("Aborted.");
+    return 1;
+  }
+  subSpin.stop(`Fetched ${String(subIssues.length)} sub-issue(s)`);
+
+  const queue = buildOrderedQueue(subIssues);
+  if (queue.kind === "error") {
+    log.error(queue.message);
+    outro("Aborted.");
+    return 1;
+  }
+
+  const branch = opts.picked.branchName;
+  const orderedIssues: OrderedIssue[] =
+    queue.kind === "standalone"
+      ? [
+          {
+            id: opts.picked.id,
+            identifier: opts.picked.identifier,
+            title: opts.picked.title,
+          },
+        ]
+      : queue.ordered;
+
+  log.info(`Branch: ${branch}`);
+  if (queue.kind === "standalone") {
+    log.info(
+      "Standalone PRD (no `ready-for-agent` direct children) — running the PRD itself."
+    );
+  } else {
+    log.info("Topo-ordered queue:");
+    for (const o of queue.ordered) {
+      log.message(`  ${o.identifier} ${o.title}`);
+    }
+  }
+
+  const proceed = await confirmRunFn(orderedIssues.length, branch);
+  if (!proceed) {
+    cancel("Cancelled before any run() invocation.");
+    return 0;
+  }
+
+  const prCreationConfirmed = await confirmPrFn();
+
+  const queueResult = await runIssueQueueFn({
+    parentIdentifier: opts.picked.identifier,
+    parentId: opts.picked.id,
+    orderedIssues,
+    branch,
+    linearCtx: opts.linearCtx,
+    repoRoot: opts.repoRoot,
+    config: opts.config,
+    sandboxEnv: opts.sandboxEnv,
+  });
+
+  if (queueResult.abortedAt) {
+    const a = queueResult.abortedAt;
+    log.error(`Aborted at ${a.identifier}: ${a.reason}`);
+    if (a.preservedWorktreePath !== undefined) {
+      log.info(`Preserved worktree at ${a.preservedWorktreePath}`);
+    }
+    log.info(
+      `Completed ${String(queueResult.completed)} of ${String(orderedIssues.length)} issue(s) before abort.`
+    );
+    outro("Aborted. Inspect the worktree, fix, and re-run on the same PRD.");
+    return 1;
+  }
+
+  // Convert ordered queue into the PR-tail's SubIssueRef shape. The PR-tail
+  // is an in-flight legacy seam keyed on numeric issue numbers; for the
+  // Linear-native flow we surface identifier strings via the title to
+  // preserve the existing template's "Sub-issues addressed" list.
+  const subIssueRefs: SubIssueRef[] = orderedIssues.map((o, i) => ({
+    number: i + 1,
+    title: `${o.identifier} ${o.title}`,
+  }));
+
+  const tail = await runPrTailStepFn({
+    prCreationConfirmed,
+    ghRepo: opts.ghRepo,
+    branch,
+    baseBranch: opts.baseBranch,
+    parentNumber: 0,
+    parentTitle: opts.picked.title,
+    subIssues: subIssueRefs,
+    repoRoot: opts.repoRoot,
+    config: opts.config,
+    sandboxEnv: opts.sandboxEnv,
+    completedCount: queueResult.completed,
+  });
+
+  if (tail.outcome.kind === "failed") {
+    log.error(tail.outcome.message);
+  } else if (tail.outcome.kind === "opened") {
+    log.success(tail.outcome.url);
+  }
+  outro(tail.outroMessage);
+  return tail.exitCode;
+}
+
 /**
  * Ensure that Sandcastle's hardcoded `.sandcastle/` directory points at the
  * tide-conventional `.tide/`. Sandcastle writes worktrees and logs under
@@ -222,6 +496,7 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   const getGhToken = options.getGhToken ?? defaultGetGhToken;
   const listPRDsFn = options.listPRDs ?? defaultListPRDs;
   const pickPRDFn = options.pickPRD ?? defaultPickPRD;
+  const runQueueAfterPickFn = options.runQueueAfterPick ?? runQueueAfterPick;
 
   let repoRoot: string;
   try {
@@ -236,8 +511,12 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   // user invoked `tide run` from — it becomes the base for the PR opened at
   // the tail of the run. Failing fast on detached HEAD here avoids burning a
   // queue's worth of work only to discover the PR step can't proceed.
+  let baseBranch: string;
   try {
-    await resolveBaseBranch(repoRoot, options.baseBranchShellRunner);
+    baseBranch = await resolveBaseBranch(
+      repoRoot,
+      options.baseBranchShellRunner
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
@@ -278,8 +557,9 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   // Resolve GitHub identity from `gh repo view`. The Linear-native flow no
   // longer fetches a triage tree from GitHub, but identity (and `gh auth
   // token` below) are still required for the eventual PR-tail step.
+  let ghIdentity: GhIdentity;
   try {
-    await getGhIdentity({ repoRoot });
+    ghIdentity = await getGhIdentity({ repoRoot });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
@@ -338,8 +618,14 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   const picked = await pickPRDFn(prds);
 
   log.info(`Selected: ${picked.identifier} ${picked.title}`);
-  outro(
-    `Selected ${picked.identifier}. Queue execution will land in a follow-up slice.`
-  );
-  return 0;
+
+  return await runQueueAfterPickFn({
+    picked,
+    ghRepo: { owner: ghIdentity.owner, repo: ghIdentity.repo },
+    baseBranch,
+    linearCtx: { apiKey: linearApiKey, teamKey: config.linear.team },
+    repoRoot,
+    config,
+    sandboxEnv,
+  });
 }
