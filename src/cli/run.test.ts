@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildOrderedQueue, runPrTailStep, tideRun } from "./run.ts";
+import {
+  buildOrderedQueue,
+  runPrTailStep,
+  runQueueAfterPick,
+  tideRun,
+  type PrTailStepResult,
+  type RunPrTailStepOptions,
+} from "./run.ts";
 import type { BuildOptions } from "./build.ts";
 import type { GhIdentity } from "../gh-identity/index.ts";
 import type { LinearContext, PRD, SubIssue } from "../linear/index.ts";
@@ -801,5 +808,259 @@ describe("buildOrderedQueue", () => {
     if (r.kind === "queue") {
       expect(r.ordered.map((o) => o.identifier)).toEqual(["ENG-2"]);
     }
+  });
+});
+
+describe("runQueueAfterPick — feature-branch guard", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  test("errors fast when invoked from the picked PRD's feature branch", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7-search",
+    });
+
+    let fetchSubIssuesCalls = 0;
+    let runIssueQueueCalls = 0;
+    let runPrTailStepCalls = 0;
+    let confirmRunCalls = 0;
+    let confirmPrCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      // baseBranch matches the PRD's branchName — user is already on the
+      // feature branch and would otherwise stack the PR on top of itself.
+      baseBranch: "user/feature/eng-7-search",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchSubIssuesCalls += 1;
+        return Promise.resolve([]);
+      },
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0 });
+      },
+      runPrTailStep: () => {
+        runPrTailStepCalls += 1;
+        return Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult);
+      },
+      confirmRun: () => {
+        confirmRunCalls += 1;
+        return Promise.resolve(true);
+      },
+      confirmPr: () => {
+        confirmPrCalls += 1;
+        return Promise.resolve(true);
+      },
+    });
+
+    expect(code).toBe(1);
+    // Fail fast: nothing past the guard runs.
+    expect(fetchSubIssuesCalls).toBe(0);
+    expect(runIssueQueueCalls).toBe(0);
+    expect(runPrTailStepCalls).toBe(0);
+    expect(confirmRunCalls).toBe(0);
+    expect(confirmPrCalls).toBe(0);
+
+    // Error message identifies the offending feature branch.
+    const out = stdoutChunks.join("");
+    expect(out).toContain("base branch");
+    expect(out).toContain("feature branch");
+    expect(out).toContain("user/feature/eng-7-search");
+  });
+
+  test("does not fire when the base branch differs from the PRD's branchName", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7-search",
+    });
+
+    let fetchSubIssuesCalls = 0;
+
+    await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchSubIssuesCalls += 1;
+        // Make the rest of the path short-circuit cleanly: a thrown error
+        // here is fine — we only care that the guard didn't preempt.
+        return Promise.reject(new Error("stop here"));
+      },
+      runIssueQueue: () => Promise.resolve({ completed: 0 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+    });
+
+    // Guard didn't fire: fetchSubIssues is reached.
+    expect(fetchSubIssuesCalls).toBe(1);
+  });
+});
+
+describe("runQueueAfterPick — end-of-run no-merge warning", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  function makeBaseOpts(
+    picked: PRD,
+    tail: (opts: RunPrTailStepOptions) => Promise<PrTailStepResult>
+  ) {
+    return {
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1 }),
+      runPrTailStep: tail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+    };
+  }
+
+  test("logs the no-merge warning when PR creation was opted out", async () => {
+    const picked = makePRD({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick(
+      makeBaseOpts(picked, () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "Done. PR step skipped (you opted out at pre-flight).",
+          exitCode: 0,
+        } satisfies PrTailStepResult)
+      )
+    );
+
+    // Warning is informational only — exit code is unchanged.
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("PRD ENG-7 will not auto-transition");
+    expect(out).toContain("Transition manually in Linear");
+  });
+
+  test("logs the no-merge warning when the rev-list gate skipped an empty branch", async () => {
+    const picked = makePRD({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick(
+      makeBaseOpts(picked, () =>
+        Promise.resolve({
+          outcome: { kind: "skipped-empty" },
+          outroMessage: "Done. PR step skipped (no commits ahead of master).",
+          exitCode: 0,
+        } satisfies PrTailStepResult)
+      )
+    );
+
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("PRD ENG-7 will not auto-transition");
+  });
+
+  test("logs the no-merge warning in addition to the existing PR-failure error", async () => {
+    const picked = makePRD({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick(
+      makeBaseOpts(picked, () =>
+        Promise.resolve({
+          outcome: { kind: "failed", message: "push refused by remote" },
+          outroMessage: "Done. PR submission failed.",
+          exitCode: 1,
+        } satisfies PrTailStepResult)
+      )
+    );
+
+    // Warning is informational only — does not change the failure exit code.
+    expect(code).toBe(1);
+    const out = stdoutChunks.join("");
+    // Existing PR-failure error is still surfaced.
+    expect(out).toContain("push refused by remote");
+    // ...and the no-merge warning is logged on top.
+    expect(out).toContain("PRD ENG-7 will not auto-transition");
+  });
+
+  test("does not log the no-merge warning when a PR was opened", async () => {
+    const picked = makePRD({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick(
+      makeBaseOpts(picked, () =>
+        Promise.resolve({
+          outcome: {
+            kind: "opened",
+            url: "https://github.com/acme/widget/pull/42",
+          },
+          outroMessage:
+            "Done. PR opened: https://github.com/acme/widget/pull/42",
+          exitCode: 0,
+        } satisfies PrTailStepResult)
+      )
+    );
+
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("will not auto-transition");
   });
 });

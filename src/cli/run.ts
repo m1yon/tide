@@ -354,6 +354,19 @@ export async function runQueueAfterPick(
   const confirmRunFn = opts.confirmRun ?? defaultConfirmRun;
   const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
 
+  // Pre-flight: refuse to run from the picked PRD's feature branch. The base
+  // branch we resolved at startup is whatever the user invoked `tide run`
+  // from; if it matches the PRD's auto-generated `branchName`, the user has
+  // already checked out the feature branch and would otherwise stack the new
+  // PR on top of itself. Fail before any Linear write or sandbox launch.
+  if (opts.picked.branchName === opts.baseBranch) {
+    log.error(
+      `tide run must be invoked from the base branch, not the feature branch (${opts.baseBranch}). Switch back to your base branch and re-run.`
+    );
+    outro("Aborted.");
+    return 1;
+  }
+
   const subSpin = spinner();
   subSpin.start("Fetching sub-issues from Linear");
   let subIssues: SubIssue[];
@@ -460,6 +473,17 @@ export async function runQueueAfterPick(
   } else if (tail.outcome.kind === "opened") {
     log.success(tail.outcome.url);
   }
+
+  // No-merge warning: any tail outcome other than `opened` means no PR was
+  // opened on this run, so Linear's GitHub integration won't auto-transition
+  // the PRD to Done on merge. Surface this as a yellow warning so the user
+  // can transition the PRD manually if they're shipping outside this run.
+  if (tail.outcome.kind !== "opened") {
+    log.warn(
+      `PRD ${opts.picked.identifier} will not auto-transition. Transition manually in Linear if shipping outside this run.`
+    );
+  }
+
   outro(tail.outroMessage);
   return tail.exitCode;
 }
