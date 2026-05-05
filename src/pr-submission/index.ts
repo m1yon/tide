@@ -45,8 +45,14 @@ export interface RunPrSubmissionOptions {
   ghRepo: GhRepo;
   branch: string;
   baseBranch: string;
-  parentNumber: number;
+  /** Linear PRD identifier (e.g. "MEC-123"). Informational only — there is
+   * no closing magic word emitted in the PR body. The PR↔PRD link is the
+   * branch name alone. */
+  parentIdentifier: string;
   parentTitle: string;
+  /** Linear PRD URL. Informational only — surfaces in the body so reviewers
+   * can click through. */
+  parentUrl: string;
   // Topo-ordered sub-issues addressed by this PR. Surfaces in the rendered
   // prompt's Context section so the agent can scope its diff summary.
   subIssues: SubIssueRef[];
@@ -148,22 +154,26 @@ export async function resolveBaseBranch(
   return branch;
 }
 
-// Bundled, interface-emphasizing PR template. Renders six body sections
+// Bundled, interface-emphasizing PR template. Renders five body sections
 // (🚩 The Problem · 💡 The Solution · 🏗 Interface Movements · 📦 Package
-// Breakdowns · 🧹 Housekeeping & Secondary Changes · `Closes #<PRD>`) plus a
-// Conventional Commits title rule. The agent classifies changed identifiers
-// as public/private using the rules in the `Interface Movements` section
-// and populates the table only with public surface that actually moved.
+// Breakdowns · 🧹 Housekeeping & Secondary Changes) plus a Conventional
+// Commits title rule. The agent classifies changed identifiers as
+// public/private using the rules in the `Interface Movements` section and
+// populates the table only with public surface that actually moved.
+//
+// No closing magic word is emitted (neither GitHub `Closes #` nor Linear
+// `Fixes`). The PR↔PRD link is the branch name alone — Linear's GitHub
+// integration auto-transitions the PRD on merge by matching the branch.
 //
 // Single-phase: no `<sub>Files-changed:</sub>` anchor links — those would
 // require a two-phase create-then-edit flow to inject post-creation URLs.
-const PR_PROMPT_TEMPLATE = `You are submitting a pull request for parent issue #{{PARENT_ID}}: {{PARENT_TITLE}}.
+const PR_PROMPT_TEMPLATE = `You are submitting a pull request for parent PRD {{PARENT_ID}}: {{PARENT_TITLE}}.
 
 The current working branch is \`{{BRANCH}}\` (already pushed to origin). Open a pull request against the base branch \`{{BASE_BRANCH}}\` for the repository \`{{REPO_OWNER}}/{{REPO_NAME}}\`.
 
 # Context
 
-- Parent PRD: {{PARENT_URL}}
+- Parent PRD: {{PARENT_ID}} ({{PARENT_URL}})
 - Sub-issues addressed (in order):
 {{SUB_ISSUES}}
 
@@ -179,7 +189,7 @@ Examples: \`feat(runner): add per-iteration timeout\` or \`refactor: extract pr-
 
 # Body — sections in this exact order
 
-Render the body as the sections below, in order, with the exact emoji headers shown. End with the \`Closes #{{PARENT_ID}}\` line.
+Render the body as the sections below, in order, with the exact emoji headers shown. Do not emit any issue-closing keyword (neither GitHub nor Linear) anywhere in the body. The branch name alone links the PR to the Linear PRD; Linear's GitHub integration auto-transitions the PRD on merge.
 
 ## 🚩 The Problem
 
@@ -224,9 +234,7 @@ Group by directory, not by file. Order packages so a reviewer can walk through t
 
 Anything that is not part of the headline change but ships in the same PR: dependency bumps, formatting passes, comment cleanups, test refactors, docs touch-ups. One bullet per item. If there is none, write \`_(none)_\`.
 
-## Closes
-
-End the body with a single line: \`Closes #{{PARENT_ID}}\`. This auto-closes the parent PRD when the PR merges. Do not include \`<sub>Files-changed:</sub>\` anchor links — the bundled template uses a single-phase \`gh pr create\` and does not inject post-creation URLs.
+Do not include \`<sub>Files-changed:</sub>\` anchor links — the bundled template uses a single-phase \`gh pr create\` and does not inject post-creation URLs.
 
 # How to submit
 
@@ -238,7 +246,7 @@ Run \`gh pr create\` against the right base. A safe invocation:
       --head {{BRANCH}} \\
       --title "<your title here>" \\
       --body-file <(cat <<'PR_BODY_EOF'
-    <your fully-rendered body here, including the Closes line>
+    <your fully-rendered body here, with no closing magic word>
     PR_BODY_EOF
     )
 
@@ -246,8 +254,10 @@ When the PR has been opened successfully, emit <promise>COMPLETE</promise> and e
 `;
 
 export interface BuildPrPromptArgsInput {
-  parentNumber: number;
+  /** Linear PRD identifier (e.g. "MEC-123"). */
+  parentIdentifier: string;
   parentTitle: string;
+  /** Linear PRD URL. */
   parentUrl: string;
   branch: string;
   baseBranch: string;
@@ -285,7 +295,7 @@ export function buildPrPromptArgs(
   input: BuildPrPromptArgsInput
 ): PrPromptArgsRecord {
   return {
-    PARENT_ID: input.parentNumber,
+    PARENT_ID: input.parentIdentifier,
     PARENT_TITLE: sanitizeInline(input.parentTitle),
     PARENT_URL: input.parentUrl,
     BRANCH: input.branch,
@@ -350,8 +360,9 @@ export async function runPrSubmission(
     ghRepo,
     branch,
     baseBranch,
-    parentNumber,
+    parentIdentifier,
     parentTitle,
+    parentUrl,
     subIssues,
     repoRoot,
     config,
@@ -380,9 +391,9 @@ export async function runPrSubmission(
   // emphasizing prompt. Inline `prompt` (not `promptFile`) — the template
   // ships in tide source and is not user-editable.
   const promptArgs = buildPrPromptArgs({
-    parentNumber,
+    parentIdentifier,
     parentTitle,
-    parentUrl: `https://github.com/${ghRepo.owner}/${ghRepo.repo}/issues/${String(parentNumber)}`,
+    parentUrl,
     branch,
     baseBranch,
     repoOwner: ghRepo.owner,

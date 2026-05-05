@@ -121,8 +121,11 @@ export interface RunPrTailStepOptions {
   ghRepo: GhRepo;
   branch: string;
   baseBranch: string;
-  parentNumber: number;
+  /** Linear PRD identifier (e.g. "MEC-123"). */
+  parentIdentifier: string;
   parentTitle: string;
+  /** Linear PRD URL. */
+  parentUrl: string;
   /** Topo-ordered sub-issues addressed by this PR. */
   subIssues: SubIssueRef[];
   repoRoot: string;
@@ -293,8 +296,9 @@ export async function runPrTailStep(
       ghRepo: opts.ghRepo,
       branch: opts.branch,
       baseBranch: opts.baseBranch,
-      parentNumber: opts.parentNumber,
+      parentIdentifier: opts.parentIdentifier,
       parentTitle: opts.parentTitle,
+      parentUrl: opts.parentUrl,
       subIssues: opts.subIssues,
       repoRoot: opts.repoRoot,
       config: opts.config,
@@ -441,8 +445,9 @@ export async function runQueueAfterPick(
     ghRepo: opts.ghRepo,
     branch,
     baseBranch: opts.baseBranch,
-    parentNumber: 0,
+    parentIdentifier: opts.picked.identifier,
     parentTitle: opts.picked.title,
+    parentUrl: opts.picked.url,
     subIssues: subIssueRefs,
     repoRoot: opts.repoRoot,
     config: opts.config,

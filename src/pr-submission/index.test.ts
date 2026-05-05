@@ -186,8 +186,9 @@ describe("runPrSubmission", () => {
       ghRepo: baseGhRepo,
       branch: "feature/per-32",
       baseBranch: "master",
-      parentNumber: 7,
+      parentIdentifier: "MEC-123",
       parentTitle: "PRD: example feature",
+      parentUrl: "https://linear.app/acme/issue/MEC-123",
       subIssues: [
         { number: 8, title: "Foundation tracer" },
         { number: 9, title: "Pre-flight clack confirm" },
@@ -219,17 +220,24 @@ describe("runPrSubmission", () => {
     });
     expect(typeof receivedRunOptions.prompt).toBe("string");
     expect(receivedRunOptions.promptFile).toBeUndefined();
-    // Body must close the parent PRD.
-    expect(receivedRunOptions.prompt).toContain("Closes #7");
+    // No closing magic word — neither GitHub nor Linear. The branch name
+    // alone links the PR to the Linear PRD on merge.
+    expect(receivedRunOptions.prompt).not.toContain("Closes #");
+    expect(receivedRunOptions.prompt).not.toMatch(/Fixes\s+MEC-/);
+    // Linear identifier surfaces in the body for human readers.
+    expect(receivedRunOptions.prompt).toContain("MEC-123");
     // Branch and base must be substituted.
     expect(receivedRunOptions.prompt).toContain("feature/per-32");
     expect(receivedRunOptions.prompt).toContain("master");
     // Repo identifier is injected so the agent can pass --repo correctly.
     expect(receivedRunOptions.prompt).toContain("acme/widget");
-    // PRD URL is derived host-side from owner/repo + parent number and
-    // surfaced to the agent so it can link back from the body.
+    // Linear PRD URL is threaded through verbatim from the caller.
     expect(receivedRunOptions.prompt).toContain(
-      "https://github.com/acme/widget/issues/7"
+      "https://linear.app/acme/issue/MEC-123"
+    );
+    // No GitHub-issues URL leaks into the body.
+    expect(receivedRunOptions.prompt).not.toContain(
+      "https://github.com/acme/widget/issues/"
     );
     // The bundled rich template ships all six sections plus a Conventional
     // Commits title rule.
@@ -276,8 +284,9 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentNumber: 7,
+        parentIdentifier: "MEC-123",
         parentTitle: "PRD",
+        parentUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
@@ -312,8 +321,9 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentNumber: 7,
+        parentIdentifier: "MEC-123",
         parentTitle: "PRD",
+        parentUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
@@ -342,8 +352,9 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentNumber: 7,
+        parentIdentifier: "MEC-123",
         parentTitle: "PRD",
+        parentUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
@@ -361,9 +372,9 @@ describe("runPrSubmission", () => {
 
 describe("buildPrPromptArgs", () => {
   const baseInput = {
-    parentNumber: 7,
+    parentIdentifier: "MEC-123",
     parentTitle: "PRD: example feature",
-    parentUrl: "https://github.com/acme/widget/issues/7",
+    parentUrl: "https://linear.app/acme/issue/MEC-123",
     branch: "feature/per-32",
     baseBranch: "master",
     repoOwner: "acme",
@@ -387,9 +398,10 @@ describe("buildPrPromptArgs", () => {
         "SUB_ISSUES",
       ].sort()
     );
-    expect(args.PARENT_ID).toBe(7);
+    // PARENT_ID is the Linear identifier string (no numeric coercion).
+    expect(args.PARENT_ID).toBe("MEC-123");
     expect(args.PARENT_TITLE).toBe("PRD: example feature");
-    expect(args.PARENT_URL).toBe("https://github.com/acme/widget/issues/7");
+    expect(args.PARENT_URL).toBe("https://linear.app/acme/issue/MEC-123");
     expect(args.BRANCH).toBe("feature/per-32");
     expect(args.BASE_BRANCH).toBe("master");
     expect(args.REPO_OWNER).toBe("acme");
