@@ -32,7 +32,7 @@ export interface BuildPromptArgsInput {
 
 export type PromptArgsRecord = Record<string, string | number | boolean>;
 
-const EMPTY_BODY_PLACEHOLDER = "_(no body)_";
+export const EMPTY_BODY_PLACEHOLDER = "_(no body)_";
 
 function renderIssueContent(issue: IssueContent): string {
   const parts: string[] = [];

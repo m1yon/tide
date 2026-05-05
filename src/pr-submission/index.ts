@@ -306,15 +306,23 @@ export function buildPrPromptArgs(
   };
 }
 
-function applyPromptTemplate(
+/**
+ * Substitute every `{{KEY}}` placeholder in `template` with `args[KEY]`.
+ * Single regex pass, so a substituted value containing literal `{{...}}`
+ * sequences (e.g. an agent transcript echoing other placeholders) is not
+ * re-substituted into a value of a later-iterated key.
+ */
+export function applyPromptTemplate(
   template: string,
-  args: PrPromptArgsRecord
+  args: Record<string, string | number>
 ): string {
-  let out = template;
-  for (const [key, value] of Object.entries(args)) {
-    out = out.replaceAll(`{{${key}}}`, String(value));
-  }
-  return out;
+  return template.replace(
+    /\{\{([A-Z_]+)\}\}/g,
+    (match: string, key: string) => {
+      const value = args[key];
+      return value === undefined ? match : String(value);
+    }
+  );
 }
 
 interface PrListItem {
