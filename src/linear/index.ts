@@ -1,36 +1,27 @@
-// Linear SDK facade. Operations:
-//   - createIssueForParent(...): create a new Linear issue on the configured
-//     team in "In Progress", assigned to the API key's owner, titled
-//     `[GH-#NN] <title>`, tagged with the `PRD` label, with a body linking
-//     back to the GitHub parent and listing in-scope sub-issues. Returns
-//     `{ branchName, identifier, url }`.
-//   - listExistingPRDs(...): list every Linear issue on the configured team
-//     that carries the `PRD` label and is in a non-terminal workflow state
-//     (state.type in {triage, backlog, unstarted, started}), ordered by
-//     `updatedAt` desc. The returned shape carries everything `tide run`
-//     needs to use the issue as the run's tracker without a second
-//     round-trip.
-//   - setupLabels(...): idempotently ensure the three labels required by the
-//     Linear-native flow (`prd`, `ready-for-agent`, `ready-for-human`) exist
+// Linear SDK facade for the Linear-native flow. Operations:
+//   - listPRDs(ctx): list every issue on the configured team that carries
+//     both `prd` and `ready-for-agent` labels and is in a non-terminal
+//     workflow state. Each entry carries the count of its direct sub-issues
+//     split by `ready-for-agent` / `ready-for-human` label.
+//   - setupLabels(ctx): idempotently ensure the three canonical labels exist
 //     on the configured team. Used by the `tide setup` subcommand.
+//   - pickWorkflowStateByType(states, type): pure helper. Given a set of
+//     workflow states and a target `state.type`, returns the id of the
+//     lowest-`position` state with that type (or undefined).
 //
-// The `PRD` label is hardcoded, scoped to the configured Linear team, and
-// auto-created lazily on first use if missing. See
-// docs/adr/0002-prd-label-as-tide-linear-marker.md for the rationale.
-//
-// Team UUID, PRD label UUID, and "In Progress" workflow-state UUID are
-// looked up at runtime via the SDK; failure to find the team or the
-// "In Progress" state is a hard exit (caller decides).
+// Workflow-state filtering uses `state.type` (not name) so per-team renames
+// of "In Progress" / "Done" don't slip terminal issues through.
 //
 // Credentials: `apiKey` is passed in (loaded from `<repoRoot>/.tide/.env` by
-// the caller). The team key and GitHub URL builder are also injected so this
-// module is repo-agnostic.
+// the caller). The team key is also injected so this module is repo-agnostic.
 
 import { LinearClient, PaginationOrderBy } from "@linear/sdk";
 
-const IN_PROGRESS_STATE_NAME = "In Progress";
-const PRD_LABEL_NAME = "PRD";
-const ACTIVE_STATE_TYPES = [
+const PRD_LABEL = "prd";
+const READY_FOR_AGENT_LABEL = "ready-for-agent";
+const READY_FOR_HUMAN_LABEL = "ready-for-human";
+
+const NON_TERMINAL_STATE_TYPES = [
   "triage",
   "backlog",
   "unstarted",
@@ -55,13 +46,7 @@ export interface SetupLabelResult {
   created: boolean;
 }
 
-export interface LinearResult {
-  branchName: string;
-  identifier: string;
-  url: string;
-}
-
-export interface ExistingPRD {
+export interface PRD {
   identifier: string;
   title: string;
   /** Workflow-state name (e.g. "In Progress"). */
@@ -69,20 +54,15 @@ export interface ExistingPRD {
   branchName: string;
   url: string;
   updatedAt: Date;
-}
-
-export interface ParentForLinear {
-  number: number;
-  title: string;
-  url: string;
-  subIssues: { number: number; title: string }[];
+  /** Direct sub-issues carrying the `ready-for-agent` label. */
+  readyForAgentCount: number;
+  /** Direct sub-issues carrying the `ready-for-human` label. */
+  readyForHumanCount: number;
 }
 
 export interface LinearContext {
   apiKey: string;
   teamKey: string;
-  /** Builds a GitHub issue URL given an issue number. */
-  ghIssueUrl: (number: number) => string;
 }
 
 let cachedClient: LinearClient | null = null;
@@ -94,157 +74,101 @@ function client(apiKey: string): LinearClient {
   return cachedClient;
 }
 
-async function findTeamId(c: LinearClient, teamKey: string): Promise<string> {
-  const teams = await c.teams({ filter: { key: { eq: teamKey } } });
-  const team = teams.nodes[0];
-  if (!team) {
-    throw new Error(
-      `Linear team with key "${teamKey}" not found. Check the team key in Linear settings ` +
-        `or update the linear.team field in .tide/config.ts.`
-    );
-  }
-  return team.id;
+export interface WorkflowStateRef {
+  id: string;
+  type: string;
+  position: number;
 }
 
-async function findInProgressStateId(
-  c: LinearClient,
-  teamId: string,
-  teamKey: string
-): Promise<string> {
-  // Workflow-state names are scoped per team. Filter on the team to avoid
-  // picking up another team's "In Progress".
-  const states = await c.workflowStates({
-    filter: {
-      team: { id: { eq: teamId } },
-      name: { eq: IN_PROGRESS_STATE_NAME },
-    },
-  });
-  const state = states.nodes[0];
-  if (!state) {
-    throw new Error(
-      `Workflow state "${IN_PROGRESS_STATE_NAME}" not found on team "${teamKey}". ` +
-        `Rename a state in Linear (Settings -> Workflow) so one is named "In Progress".`
-    );
+/**
+ * Pure helper. Given a set of workflow states and a target `state.type`,
+ * return the id of the lowest-`position` state with that type, or undefined
+ * when no state matches.
+ *
+ * Resolves states by `type` rather than `name` so per-team renames of
+ * "In Progress", "Done", etc. don't break tide.
+ */
+export function pickWorkflowStateByType(
+  states: readonly WorkflowStateRef[],
+  type: string
+): string | undefined {
+  let best: WorkflowStateRef | undefined;
+  for (const s of states) {
+    if (s.type !== type) continue;
+    if (!best || s.position < best.position) best = s;
   }
-  return state.id;
+  return best?.id;
 }
 
-// Find the team-scoped `PRD` label, creating it if absent. Tide owns this
-// label — see ADR 0002 — so lazy auto-create is the right contract here.
-async function findOrCreatePrdLabelId(
-  c: LinearClient,
-  teamId: string
-): Promise<string> {
-  const existing = await c.issueLabels({
-    filter: {
-      team: { id: { eq: teamId } },
-      name: { eq: PRD_LABEL_NAME },
-    },
-  });
-  const found = existing.nodes[0];
-  if (found) return found.id;
-
-  const payload = await c.createIssueLabel({
-    teamId,
-    name: PRD_LABEL_NAME,
-  });
-  if (!payload.success) {
-    throw new Error("Linear createIssueLabel returned success=false.");
-  }
-  const labelId = payload.issueLabelId;
-  if (typeof labelId !== "string" || labelId === "") {
-    throw new Error("Linear createIssueLabel did not return a label id.");
-  }
-  return labelId;
+/**
+ * Filter shape consumed by `listPRDs` via the SDK's `issues` method. The
+ * production caller passes the real `LinearClient`; tests pass a hand-rolled
+ * stub matching the same shape.
+ */
+export interface ListPRDsIssueFilter {
+  team?: { id: { eq: string } };
+  parent?: { id: { eq: string } };
+  labels?: { name: { eq: string } };
+  and?: ListPRDsIssueFilter[];
+  state?: { type: { in: string[] } };
 }
 
-function buildBody(
-  parent: ParentForLinear,
-  ghIssueUrl: (n: number) => string
-): string {
-  const subsBlock =
-    parent.subIssues.length === 0
-      ? "_(no in-scope sub-issues)_"
-      : parent.subIssues
-          .map(
-            (s) =>
-              `- [#${String(s.number)} ${s.title}](${ghIssueUrl(s.number)})`
-          )
-          .join("\n");
-  return [
-    `Tracks GitHub PRD [#${String(parent.number)} ${parent.title}](${parent.url}).`,
-    "",
-    "## In-scope sub-issues",
-    "",
-    subsBlock,
-  ].join("\n");
+interface ListPRDsIssueNode {
+  id: string;
+  identifier: string;
+  title: string;
+  stateId: string | undefined;
+  branchName: string;
+  url: string;
+  updatedAt: Date;
 }
 
-export async function createIssueForParent(
+/**
+ * Minimal subset of `LinearClient` consumed by `listPRDs`. Surfaced as a
+ * named seam so tests can drive the function without mocking the entire SDK.
+ *
+ * `issues` is invoked twice per call to `listPRDs`: once for the PRD list
+ * (filtered by team + labels + non-terminal state.type), and twice per
+ * returned PRD for direct sub-issue counts (filtered by parent.id + label).
+ */
+export interface ListPRDsClient {
+  teams(args: { filter: { key: { eq: string } } }): Promise<{
+    nodes: { id: string }[];
+  }>;
+  workflowStates(args: { filter: { team: { id: { eq: string } } } }): Promise<{
+    nodes: { id: string; name: string; type: string; position: number }[];
+  }>;
+  issues(args: {
+    filter: ListPRDsIssueFilter;
+    orderBy?: PaginationOrderBy;
+  }): Promise<{ nodes: ListPRDsIssueNode[] }>;
+}
+
+/**
+ * List every PRD (issue tagged with both `prd` and `ready-for-agent` on the
+ * configured team, in a non-terminal workflow state) ordered by `updatedAt`
+ * desc. Each PRD carries the count of its direct sub-issues split by
+ * `ready-for-agent` / `ready-for-human` label.
+ *
+ * `_client` is a test seam — production callers omit it and the real
+ * `LinearClient` is constructed from `ctx.apiKey`.
+ */
+export async function listPRDs(
   ctx: LinearContext,
-  parent: ParentForLinear
-): Promise<LinearResult> {
-  const c = client(ctx.apiKey);
-  const [teamId, viewer] = await Promise.all([
-    findTeamId(c, ctx.teamKey),
-    c.viewer,
-  ]);
-  const [stateId, labelId] = await Promise.all([
-    findInProgressStateId(c, teamId, ctx.teamKey),
-    findOrCreatePrdLabelId(c, teamId),
-  ]);
-
-  const title = `[GH-#${String(parent.number)}] ${parent.title}`;
-  const description = buildBody(parent, ctx.ghIssueUrl);
-
-  const payload = await c.createIssue({
-    teamId,
-    stateId,
-    assigneeId: viewer.id,
-    labelIds: [labelId],
-    title,
-    description,
-  });
-  if (!payload.success) {
-    throw new Error("Linear createIssue returned success=false.");
-  }
-  const issue = await payload.issue;
-  if (!issue) {
-    throw new Error("Linear createIssue did not return the created issue.");
-  }
-  return {
-    branchName: issue.branchName,
-    identifier: issue.identifier,
-    url: issue.url,
-  };
-}
-
-// List every PRD-labelled issue on the configured team in a non-terminal
-// workflow state, ordered by `updatedAt` desc. The PRD label is created
-// lazily if absent (matching createIssueForParent), which means an empty
-// list is a real "no candidates", not a "label is missing" error.
-//
-// Workflow state is filtered by `type` (not name) so team-level renames of
-// "Done"/"Cancelled" don't slip terminal issues into the select.
-//
-// Workflow-state names are resolved via a single batched lookup of the
-// team's states; per-issue `issue.state` would be N+1.
-export async function listExistingPRDs(
-  ctx: LinearContext
-): Promise<ExistingPRD[]> {
-  const c = client(ctx.apiKey);
+  _client?: ListPRDsClient
+): Promise<PRD[]> {
+  const c: ListPRDsClient = _client ?? client(ctx.apiKey);
   const teamId = await findTeamId(c, ctx.teamKey);
-  // Touch the label to ensure it exists; the issues filter below would
-  // simply return [] if the label doesn't exist yet, so the create path
-  // here is purely for the create-new branch's later use.
-  await findOrCreatePrdLabelId(c, teamId);
 
-  const [issuesConn, statesConn] = await Promise.all([
+  const [prdConn, statesConn] = await Promise.all([
     c.issues({
       filter: {
         team: { id: { eq: teamId } },
-        labels: { name: { eq: PRD_LABEL_NAME } },
-        state: { type: { in: [...ACTIVE_STATE_TYPES] } },
+        and: [
+          { labels: { name: { eq: PRD_LABEL } } },
+          { labels: { name: { eq: READY_FOR_AGENT_LABEL } } },
+        ],
+        state: { type: { in: [...NON_TERMINAL_STATE_TYPES] } },
       },
       orderBy: PaginationOrderBy.UpdatedAt,
     }),
@@ -254,17 +178,57 @@ export async function listExistingPRDs(
   const stateNameById = new Map<string, string>();
   for (const s of statesConn.nodes) stateNameById.set(s.id, s.name);
 
-  return issuesConn.nodes.map((issue) => ({
-    identifier: issue.identifier,
-    title: issue.title,
-    state:
-      typeof issue.stateId === "string"
-        ? (stateNameById.get(issue.stateId) ?? "")
-        : "",
-    branchName: issue.branchName,
-    url: issue.url,
-    updatedAt: issue.updatedAt,
-  }));
+  const prds: PRD[] = [];
+  for (const issue of prdConn.nodes) {
+    const [agentChildren, humanChildren] = await Promise.all([
+      c.issues({
+        filter: {
+          parent: { id: { eq: issue.id } },
+          labels: { name: { eq: READY_FOR_AGENT_LABEL } },
+        },
+      }),
+      c.issues({
+        filter: {
+          parent: { id: { eq: issue.id } },
+          labels: { name: { eq: READY_FOR_HUMAN_LABEL } },
+        },
+      }),
+    ]);
+    prds.push({
+      identifier: issue.identifier,
+      title: issue.title,
+      state:
+        typeof issue.stateId === "string"
+          ? (stateNameById.get(issue.stateId) ?? "")
+          : "",
+      branchName: issue.branchName,
+      url: issue.url,
+      updatedAt: issue.updatedAt,
+      readyForAgentCount: agentChildren.nodes.length,
+      readyForHumanCount: humanChildren.nodes.length,
+    });
+  }
+
+  return prds;
+}
+
+async function findTeamId(
+  c: {
+    teams(args: {
+      filter: { key: { eq: string } };
+    }): Promise<{ nodes: { id: string }[] }>;
+  },
+  teamKey: string
+): Promise<string> {
+  const teams = await c.teams({ filter: { key: { eq: teamKey } } });
+  const team = teams.nodes[0];
+  if (!team) {
+    throw new Error(
+      `Linear team with key "${teamKey}" not found. Check the team key in Linear settings ` +
+        `or update the linear.team field in .tide/config.ts.`
+    );
+  }
+  return team.id;
 }
 
 /**
@@ -302,15 +266,7 @@ export async function setupLabels(
   _client?: SetupLabelsClient
 ): Promise<SetupLabelResult[]> {
   const c: SetupLabelsClient = _client ?? client(ctx.apiKey);
-  const teams = await c.teams({ filter: { key: { eq: ctx.teamKey } } });
-  const team = teams.nodes[0];
-  if (!team) {
-    throw new Error(
-      `Linear team with key "${ctx.teamKey}" not found. Check the team key in Linear settings ` +
-        `or update the linear.team field in .tide/config.ts.`
-    );
-  }
-  const teamId = team.id;
+  const teamId = await findTeamId(c, ctx.teamKey);
 
   const existing = await c.issueLabels({
     filter: {

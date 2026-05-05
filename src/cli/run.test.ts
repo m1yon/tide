@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPrTailStep, tideRun } from "./run.ts";
 import type { BuildOptions } from "./build.ts";
-import type { GhRepo, TreeNode } from "../github/index.ts";
 import type { GhIdentity } from "../gh-identity/index.ts";
+import type { LinearContext, PRD } from "../linear/index.ts";
 import type {
   PrSubmissionResult,
   ShellResult,
@@ -44,16 +44,46 @@ function makeGhToken(log: CallLog) {
   };
 }
 
-interface FetchStub {
-  tree: TreeNode[];
-  calls: GhRepo[];
+interface ListPRDsStub {
+  prds: PRD[];
+  calls: LinearContext[];
 }
 
-function makeFetchTriageTree(stub: FetchStub, log: CallLog) {
-  return (ghRepo: GhRepo): Promise<TreeNode[]> => {
-    stub.calls.push(ghRepo);
-    log.events.push("fetchTriageTree");
-    return Promise.resolve(stub.tree);
+function makeListPRDs(stub: ListPRDsStub, log: CallLog) {
+  return (ctx: LinearContext): Promise<PRD[]> => {
+    stub.calls.push(ctx);
+    log.events.push("listPRDs");
+    return Promise.resolve(stub.prds);
+  };
+}
+
+interface PickPRDStub {
+  /** Index into the prds list to pick. */
+  pickIndex: number;
+  calls: number;
+}
+
+function makePickPRD(stub: PickPRDStub, log: CallLog) {
+  return (prds: readonly PRD[]): Promise<PRD> => {
+    stub.calls += 1;
+    log.events.push("pickPRD");
+    const picked = prds[stub.pickIndex];
+    if (!picked) throw new Error("pickPRD stub: index out of range");
+    return Promise.resolve(picked);
+  };
+}
+
+function makePRD(overrides: Partial<PRD> = {}): PRD {
+  return {
+    identifier: "ENG-1",
+    title: "Example PRD",
+    state: "Backlog",
+    branchName: "user/feature/eng-1-example",
+    url: "https://linear.app/eng/issue/ENG-1",
+    updatedAt: new Date("2026-04-01T00:00:00Z"),
+    readyForAgentCount: 2,
+    readyForHumanCount: 0,
+    ...overrides,
   };
 }
 
@@ -89,7 +119,7 @@ const okBaseBranchRunner = constShellRunner({
   stderr: "",
 });
 
-describe("tide run — build step", () => {
+describe("tide run — early gates and Linear PRD selector", () => {
   let workDir: string;
   let repoRoot: string;
   let tideDir: string;
@@ -125,10 +155,10 @@ describe("tide run — build step", () => {
     rmSync(workDir, { recursive: true, force: true });
   });
 
-  test("invokes build before fetching the triage tree", async () => {
+  test("invokes build before fetching Linear PRDs", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const fetchStub: FetchStub = { tree: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
 
     const code = await tideRun({
       repoRoot,
@@ -137,23 +167,23 @@ describe("tide run — build step", () => {
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
-      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      listPRDs: makeListPRDs(listStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
     expect(code).toBe(0);
     expect(buildStub.calls).toHaveLength(1);
-    expect(fetchStub.calls).toHaveLength(1);
+    expect(listStub.calls).toHaveLength(1);
     const buildIdx = log.events.indexOf("build");
-    const fetchIdx = log.events.indexOf("fetchTriageTree");
+    const listIdx = log.events.indexOf("listPRDs");
     expect(buildIdx).toBeGreaterThanOrEqual(0);
-    expect(fetchIdx).toBeGreaterThan(buildIdx);
+    expect(listIdx).toBeGreaterThan(buildIdx);
   });
 
   test("build receives the resolved repoRoot and the same stdout/stderr sinks", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const fetchStub: FetchStub = { tree: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
 
     await tideRun({
       repoRoot,
@@ -162,7 +192,7 @@ describe("tide run — build step", () => {
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
-      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      listPRDs: makeListPRDs(listStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -173,10 +203,10 @@ describe("tide run — build step", () => {
     expect(call.stderr).toBe(captureStderr);
   });
 
-  test("build failure short-circuits with the build's exit code; triage tree fetch never runs", async () => {
+  test("build failure short-circuits with the build's exit code; PRD fetch never runs", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 2, calls: [] };
-    const fetchStub: FetchStub = { tree: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
 
     const code = await tideRun({
       repoRoot,
@@ -185,19 +215,20 @@ describe("tide run — build step", () => {
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
-      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      listPRDs: makeListPRDs(listStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
     expect(code).toBe(2);
     expect(buildStub.calls).toHaveLength(1);
-    expect(fetchStub.calls).toHaveLength(0);
+    expect(listStub.calls).toHaveLength(0);
   });
 
-  test("build success allows the existing flow to proceed", async () => {
+  test("empty PRD list exits cleanly without invoking the selector", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const fetchStub: FetchStub = { tree: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const pickStub: PickPRDStub = { pickIndex: 0, calls: 0 };
 
     const code = await tideRun({
       repoRoot,
@@ -206,20 +237,57 @@ describe("tide run — build step", () => {
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
-      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      listPRDs: makeListPRDs(listStub, log),
+      pickPRD: makePickPRD(pickStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
-    // Empty triage tree → "Nothing to triage" branch returns 0.
     expect(code).toBe(0);
-    expect(buildStub.calls).toHaveLength(1);
-    expect(fetchStub.calls).toHaveLength(1);
+    expect(pickStub.calls).toBe(0);
   });
 
-  test("build runs after gh-identity is resolved", async () => {
+  test("non-empty PRD list invokes pickPRD and exits cleanly with `Selected: <PRD>`", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const fetchStub: FetchStub = { tree: [], calls: [] };
+    const listStub: ListPRDsStub = {
+      prds: [
+        makePRD({ identifier: "ENG-7", title: "Search rewrite" }),
+        makePRD({ identifier: "ENG-8", title: "Auth migration" }),
+      ],
+      calls: [],
+    };
+    const pickStub: PickPRDStub = { pickIndex: 1, calls: 0 };
+
+    const code = await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs: makeListPRDs(listStub, log),
+      pickPRD: makePickPRD(pickStub, log),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(code).toBe(0);
+    expect(pickStub.calls).toBe(1);
+
+    const pickIdx = log.events.indexOf("pickPRD");
+    const listIdx = log.events.indexOf("listPRDs");
+    expect(listIdx).toBeGreaterThanOrEqual(0);
+    expect(pickIdx).toBeGreaterThan(listIdx);
+
+    // No queue or PR-tail step events fire — those are out of scope for this
+    // slice. (The sentinel here is that no other events appear after pickPRD.)
+    const eventsAfterPick = log.events.slice(pickIdx + 1);
+    expect(eventsAfterPick).toEqual([]);
+  });
+
+  test("listPRDs receives the LINEAR_API_KEY and team key from config", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
 
     await tideRun({
       repoRoot,
@@ -228,7 +296,49 @@ describe("tide run — build step", () => {
       build: makeBuild(buildStub, log),
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
-      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      listPRDs: makeListPRDs(listStub, log),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(listStub.calls[0]?.apiKey).toBe("lk");
+    expect(listStub.calls[0]?.teamKey).toBe("ENG");
+  });
+
+  test("LINEAR_API_KEY is not forwarded into the sandbox (it stays host-side)", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+
+    // We can't observe the sandbox env directly here (the queue path is out
+    // of scope for this slice). The narrower assertion: tideRun does not
+    // error out on the LINEAR_API_KEY being absent from sandboxEnv.
+    const code = await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs: makeListPRDs(listStub, log),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(code).toBe(0);
+  });
+
+  test("build runs after gh-identity is resolved", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+
+    await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs: makeListPRDs(listStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -241,7 +351,7 @@ describe("tide run — build step", () => {
   test("getGhToken runs after gh-identity and before docker build", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const fetchStub: FetchStub = { tree: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
 
     await tideRun({
       repoRoot,
@@ -253,7 +363,7 @@ describe("tide run — build step", () => {
         log.events.push("getGhToken");
         return Promise.resolve("ghp_test");
       },
-      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      listPRDs: makeListPRDs(listStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -268,7 +378,7 @@ describe("tide run — build step", () => {
   test("getGhToken failure short-circuits before build", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const fetchStub: FetchStub = { tree: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
 
     const code = await tideRun({
       repoRoot,
@@ -280,14 +390,35 @@ describe("tide run — build step", () => {
         Promise.reject(
           new Error("tide: `gh auth token` failed. Run `gh auth login`")
         ),
-      fetchTriageTree: makeFetchTriageTree(fetchStub, log),
+      listPRDs: makeListPRDs(listStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
     expect(code).toBe(1);
     expect(buildStub.calls).toHaveLength(0);
-    expect(fetchStub.calls).toHaveLength(0);
+    expect(listStub.calls).toHaveLength(0);
     expect(stderrChunks.join("")).toContain("gh auth login");
+  });
+
+  test("Linear fetch failure surfaces a clear error and non-zero exit", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listPRDs = (): Promise<PRD[]> =>
+      Promise.reject(new Error("Linear API key invalid"));
+
+    const code = await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs,
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(code).toBe(1);
+    expect(stderrChunks.join("")).toContain("Linear API key invalid");
   });
 });
 

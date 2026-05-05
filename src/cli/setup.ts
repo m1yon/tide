@@ -67,13 +67,7 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     return 1;
   }
 
-  const ctx: LinearContext = {
-    apiKey,
-    teamKey,
-    // setupLabels does not consume `ghIssueUrl`; supply a no-op so the shared
-    // LinearContext shape is satisfied.
-    ghIssueUrl: (n: number) => `https://github.com/_/_/issues/${String(n)}`,
-  };
+  const ctx: LinearContext = { apiKey, teamKey };
 
   let results: SetupLabelResult[];
   try {
