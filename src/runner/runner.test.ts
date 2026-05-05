@@ -3,14 +3,19 @@
 //
 // - sub-issue is transitioned to In Progress *before* run() fires
 // - DONE signal + commits → transition to Done, queue continues
-// - failed iteration (no DONE / no commits) → queue aborts, no Done
-//   transition, preserved worktree path bubbles up
-// - infra FAIL (run() throws) → queue aborts, no transitions fire
+// - BLOCKED signal → flip label to ready-for-human, post comment, continue
+// - agent-FAIL (no DONE, no commits) → flip + comment + continue
+// - infra FAIL (run() throws) → queue aborts, no label flip
 // - per-iteration prompt args carry baseBranch through
 
 import { describe, expect, test } from "bun:test";
 import type { RunResult, RunOptions } from "@ai-hero/sandcastle";
-import { DONE_SIGNAL, runIssueQueue, type OrderedIssue } from "./index.ts";
+import {
+  BLOCKED_SIGNAL,
+  DONE_SIGNAL,
+  runIssueQueue,
+  type OrderedIssue,
+} from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { LinearContext, LinearIssueContent } from "../linear/index.ts";
 
@@ -98,8 +103,11 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     ]);
   });
 
-  test("agent-FAIL (no commits + no signal) aborts the queue and never transitions to Done", async () => {
+  test("agent-FAIL (no commits + no signal) flips label, posts comment, and continues", async () => {
     const events: string[] = [];
+    const flipCalls: string[] = [];
+    const postedComments: { issueId: string; body: string }[] = [];
+    let runCount = 0;
 
     const result = await runIssueQueue({
       parentIdentifier: "ENG-100",
@@ -123,28 +131,158 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push(`done:${issueId}`);
         return Promise.resolve();
       },
+      flipLabelToReadyForHuman: (_ctx, issueId) => {
+        events.push(`flip:${issueId}`);
+        flipCalls.push(issueId);
+        return Promise.resolve();
+      },
+      postComment: (_ctx, issueId, body) => {
+        events.push(`comment:${issueId}`);
+        postedComments.push({ issueId, body });
+        return Promise.resolve();
+      },
       sandcastleRun: () => {
         events.push("run");
+        runCount += 1;
+        // First sub-issue agent-fails; second sub-issue succeeds.
         return Promise.resolve(
-          makeRunResult({
-            commits: [],
-            completionSignal: undefined,
-            preservedWorktreePath: "/path/to/worktree",
-          })
+          runCount === 1
+            ? makeRunResult({
+                commits: [],
+                completionSignal: undefined,
+                preservedWorktreePath: "/path/to/worktree",
+              })
+            : makeRunResult()
         );
       },
     });
 
-    expect(result.completed).toBe(0);
-    expect(result.abortedAt?.identifier).toBe("ENG-1");
-    expect(result.abortedAt?.reason).toContain("no commit");
-    expect(result.abortedAt?.preservedWorktreePath).toBe("/path/to/worktree");
-    // First sub-issue transitioned to In Progress, then run failed.
-    // No Done transition was issued; the second sub-issue never started.
-    expect(events).toEqual(["inProgress:uuid-1", "run"]);
+    expect(result.completed).toBe(1);
+    expect(result.flipped).toBe(1);
+    // No abort: queue continued past the agent-FAIL.
+    expect(result.abortedAt).toBeUndefined();
+    expect(flipCalls).toEqual(["uuid-1"]);
+    // Comment was posted on the agent-failed sub-issue with a recognisable
+    // FAIL reason and the preserved worktree path so a human can inspect it.
+    expect(postedComments).toHaveLength(1);
+    expect(postedComments[0]?.issueId).toBe("uuid-1");
+    expect(postedComments[0]?.body).toContain("FAIL");
+    expect(postedComments[0]?.body).toContain("ready-for-human");
+    expect(postedComments[0]?.body).toContain("/path/to/worktree");
+    // Order: flip happens before comment (flip is the queue-gating write).
+    // Then the second sub-issue runs and reaches Done normally.
+    expect(events).toEqual([
+      "inProgress:uuid-1",
+      "run",
+      "flip:uuid-1",
+      "comment:uuid-1",
+      "inProgress:uuid-2",
+      "run",
+      "done:uuid-2",
+    ]);
   });
 
-  test("DONE signalled but no commits → still treated as failed (no Done transition)", async () => {
+  test("BLOCKED signal flips label, posts comment with BLOCKED reason, and continues", async () => {
+    const events: string[] = [];
+    const postedComments: { issueId: string; body: string }[] = [];
+    let runCount = 0;
+
+    const result = await runIssueQueue({
+      parentIdentifier: "ENG-100",
+      parentId: "uuid-prd",
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+      ],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: (_ctx, issueId) => {
+        events.push(`inProgress:${issueId}`);
+        return Promise.resolve();
+      },
+      transitionToDone: (_ctx, issueId) => {
+        events.push(`done:${issueId}`);
+        return Promise.resolve();
+      },
+      flipLabelToReadyForHuman: (_ctx, issueId) => {
+        events.push(`flip:${issueId}`);
+        return Promise.resolve();
+      },
+      postComment: (_ctx, issueId, body) => {
+        events.push(`comment:${issueId}`);
+        postedComments.push({ issueId, body });
+        return Promise.resolve();
+      },
+      sandcastleRun: () => {
+        events.push("run");
+        runCount += 1;
+        return Promise.resolve(
+          runCount === 1
+            ? makeRunResult({
+                commits: [{ sha: "partial" }],
+                completionSignal: BLOCKED_SIGNAL,
+              })
+            : makeRunResult()
+        );
+      },
+    });
+
+    expect(result.completed).toBe(1);
+    expect(result.flipped).toBe(1);
+    expect(result.abortedAt).toBeUndefined();
+    expect(postedComments[0]?.body).toContain("BLOCKED");
+    // The sub-issue's workflow state was NOT transitioned to Done.
+    expect(events).not.toContain("done:uuid-1");
+    // The flip-then-continue ordering is preserved.
+    expect(events).toEqual([
+      "inProgress:uuid-1",
+      "run",
+      "flip:uuid-1",
+      "comment:uuid-1",
+      "inProgress:uuid-2",
+      "run",
+      "done:uuid-2",
+    ]);
+  });
+
+  test("BLOCKED registers BLOCKED_SIGNAL with sandcastle alongside DONE_SIGNAL", async () => {
+    let capturedSignal: string | string[] | undefined;
+
+    await runIssueQueue({
+      parentIdentifier: "ENG-100",
+      parentId: "uuid-prd",
+      orderedIssues: [makeOrdered()],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      flipLabelToReadyForHuman: () => Promise.resolve(),
+      postComment: () => Promise.resolve(),
+      sandcastleRun: (opts) => {
+        capturedSignal = opts.completionSignal;
+        return Promise.resolve(makeRunResult());
+      },
+    });
+
+    // Sandcastle must short-circuit on either DONE or BLOCKED — pass both.
+    expect(Array.isArray(capturedSignal)).toBe(true);
+    if (Array.isArray(capturedSignal)) {
+      expect(capturedSignal).toContain(DONE_SIGNAL);
+      expect(capturedSignal).toContain(BLOCKED_SIGNAL);
+    }
+  });
+
+  test("DONE signalled but no commits → routed through agent-FAIL flip path (continue, not abort)", async () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
@@ -164,6 +302,14 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       },
       transitionToDone: () => {
         events.push("done");
+        return Promise.resolve();
+      },
+      flipLabelToReadyForHuman: () => {
+        events.push("flip");
+        return Promise.resolve();
+      },
+      postComment: () => {
+        events.push("comment");
         return Promise.resolve();
       },
       sandcastleRun: () =>
@@ -175,14 +321,14 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         ),
     });
 
-    expect(result.completed).toBe(0);
-    expect(result.abortedAt?.reason).toMatch(/DONE without committing/);
     // No `done` event — Done transition never fires when the agent didn't
-    // actually commit.
-    expect(events).toEqual(["inProgress"]);
+    // commit. But the queue did NOT abort — the issue was flipped instead.
+    expect(result.abortedAt).toBeUndefined();
+    expect(result.flipped).toBe(1);
+    expect(events).toEqual(["inProgress", "flip", "comment"]);
   });
 
-  test("commits without a DONE signal → failed (the new prompt requires DONE)", async () => {
+  test("commits without a DONE signal → routed through agent-FAIL flip path (continue, not abort)", async () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
@@ -204,6 +350,14 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push("done");
         return Promise.resolve();
       },
+      flipLabelToReadyForHuman: () => {
+        events.push("flip");
+        return Promise.resolve();
+      },
+      postComment: () => {
+        events.push("comment");
+        return Promise.resolve();
+      },
       sandcastleRun: () =>
         Promise.resolve(
           makeRunResult({
@@ -213,9 +367,54 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         ),
     });
 
+    expect(result.abortedAt).toBeUndefined();
+    expect(result.flipped).toBe(1);
+    expect(events).toEqual(["inProgress", "flip", "comment"]);
+  });
+
+  test("label-flip failure surfaces as an infra abort (no comment, no further sub-issues)", async () => {
+    const events: string[] = [];
+
+    const result = await runIssueQueue({
+      parentIdentifier: "ENG-100",
+      parentId: "uuid-prd",
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+      ],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      flipLabelToReadyForHuman: () => {
+        events.push("flip");
+        return Promise.reject(new Error("Linear write rate-limited"));
+      },
+      postComment: () => {
+        events.push("comment");
+        return Promise.resolve();
+      },
+      sandcastleRun: () =>
+        Promise.resolve(
+          makeRunResult({
+            commits: [],
+            completionSignal: BLOCKED_SIGNAL,
+          })
+        ),
+    });
+
     expect(result.completed).toBe(0);
-    expect(result.abortedAt?.reason).toMatch(/did not emit/);
-    expect(events).toEqual(["inProgress"]);
+    expect(result.flipped).toBe(0);
+    expect(result.abortedAt?.identifier).toBe("ENG-1");
+    expect(result.abortedAt?.reason).toContain("label flip failed");
+    expect(result.abortedAt?.reason).toContain("rate-limited");
+    // Comment never fires when the flip failed.
+    expect(events).toEqual(["flip"]);
   });
 
   test("infra FAIL (sandcastle threw) aborts without flipping any state", async () => {
@@ -328,7 +527,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
 });
 
 describe("runIssueQueue — prompt args + sandcastle wiring", () => {
-  test("registers DONE_SIGNAL with sandcastle and forwards baseBranch as BASE_BRANCH", async () => {
+  test("registers both DONE and BLOCKED signals with sandcastle and forwards baseBranch as BASE_BRANCH", async () => {
     let capturedOpts: RunOptions | undefined;
 
     await runIssueQueue({
@@ -345,6 +544,8 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
         Promise.resolve(makeIssueContent({ identifier: "ENG-7" })),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
+      flipLabelToReadyForHuman: () => Promise.resolve(),
+      postComment: () => Promise.resolve(),
       sandcastleRun: (opts) => {
         capturedOpts = opts;
         return Promise.resolve(makeRunResult());
@@ -353,15 +554,19 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
 
     expect(capturedOpts).toBeDefined();
     if (!capturedOpts) throw new Error("unreachable");
-    expect(capturedOpts.completionSignal).toBe(DONE_SIGNAL);
+    expect(capturedOpts.completionSignal).toEqual([
+      DONE_SIGNAL,
+      BLOCKED_SIGNAL,
+    ]);
     const args = capturedOpts.promptArgs as Record<string, string>;
     expect(args.BASE_BRANCH).toBe("main");
     expect(args.BRANCH).toBe("user/feature/eng-7");
     expect(args.ISSUE_ID).toBe("ENG-7");
   });
 
-  test("legacy <promise>COMPLETE</promise> is no longer accepted as a success signal", async () => {
+  test("legacy <promise>COMPLETE</promise> is no longer accepted as a success signal — flips through agent-FAIL", async () => {
     let doneCalls = 0;
+    let flipCalls = 0;
 
     const result = await runIssueQueue({
       parentIdentifier: "ENG-100",
@@ -379,9 +584,14 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
         doneCalls += 1;
         return Promise.resolve();
       },
+      flipLabelToReadyForHuman: () => {
+        flipCalls += 1;
+        return Promise.resolve();
+      },
+      postComment: () => Promise.resolve(),
       // The agent emitted the *old* COMPLETE signal — sandcastle wouldn't
-      // even have matched it because the runner registers DONE only. We
-      // simulate the post-iteration result directly.
+      // even have matched it because the runner registers DONE/BLOCKED only.
+      // We simulate the post-iteration result directly.
       sandcastleRun: () =>
         Promise.resolve(
           makeRunResult({
@@ -391,9 +601,12 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
         ),
     });
 
-    // Failed: COMPLETE is no longer treated as success, so no Done
-    // transition fires and the queue aborts.
-    expect(result.abortedAt).toBeDefined();
+    // No Done transition: COMPLETE is not success. The queue does not abort
+    // (S5 routes non-success non-infra-fail outcomes through the flip-and-
+    // continue path); the sub-issue is flipped to ready-for-human.
+    expect(result.abortedAt).toBeUndefined();
     expect(doneCalls).toBe(0);
+    expect(flipCalls).toBe(1);
+    expect(result.flipped).toBe(1);
   });
 });

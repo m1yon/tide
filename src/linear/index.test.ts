@@ -4,8 +4,10 @@ import {
   SETUP_LABEL_NAMES,
   fetchIssueContent,
   fetchSubIssues,
+  flipLabelToReadyForHuman,
   listPRDs,
   pickWorkflowStateByType,
+  postComment,
   setupLabels,
   transitionToDone,
   transitionToInProgress,
@@ -811,5 +813,211 @@ describe("linear.transitionToDone", () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/completed/);
+  });
+});
+
+interface FlipStubOptions {
+  /** Labels currently on the issue. */
+  issueLabels?: { id: string; name: string }[];
+  /** Labels available on the team. */
+  teamLabels?: { id: string; name: string }[];
+  /** If true, the issue lookup returns null. */
+  missingIssue?: boolean;
+  /** If true, issueUpdate returns success=false. */
+  mutationFailure?: boolean;
+}
+
+function makeFlipStub(opts: FlipStubOptions = {}): {
+  request: LinearGqlRequest;
+  calls: GqlCall[];
+} {
+  const issueLabels = opts.issueLabels ?? [
+    { id: "label-rfa", name: "ready-for-agent" },
+  ];
+  const teamLabels = opts.teamLabels ?? [
+    { id: "label-prd", name: "prd" },
+    { id: "label-rfa", name: "ready-for-agent" },
+    { id: "label-rfh", name: "ready-for-human" },
+  ];
+  return makeGqlStub((call) => {
+    if (call.query.includes("TideIssueLabelsForFlip")) {
+      if (opts.missingIssue) return { issue: null };
+      return {
+        issue: {
+          id: call.variables.id,
+          labels: { nodes: issueLabels },
+          team: { labels: { nodes: teamLabels } },
+        },
+      };
+    }
+    if (call.query.includes("TideIssueLabelFlip")) {
+      return {
+        issueUpdate: { success: !opts.mutationFailure },
+      };
+    }
+    throw new Error(`unexpected query: ${call.query}`);
+  });
+}
+
+describe("linear.flipLabelToReadyForHuman", () => {
+  test("performs the flip as a single issueUpdate mutation with the new label-id set", async () => {
+    const stub = makeFlipStub({
+      issueLabels: [
+        { id: "label-area", name: "area:auth" },
+        { id: "label-rfa", name: "ready-for-agent" },
+      ],
+      teamLabels: [
+        { id: "label-prd", name: "prd" },
+        { id: "label-rfa", name: "ready-for-agent" },
+        { id: "label-rfh", name: "ready-for-human" },
+        { id: "label-area", name: "area:auth" },
+      ],
+    });
+
+    await flipLabelToReadyForHuman(ctx, "issue-uuid", stub.request);
+
+    // Two GraphQL calls: one read (current labels + team labels), one write
+    // (the issueUpdate mutation). The single mutation is what makes the flip
+    // atomic — the user sees one timeline event, not two.
+    expect(stub.calls).toHaveLength(2);
+    const fetchCall = stub.calls[0];
+    const mutateCall = stub.calls[1];
+    if (!fetchCall || !mutateCall) throw new Error("unreachable");
+    expect(fetchCall.query).toContain("TideIssueLabelsForFlip");
+    expect(mutateCall.query).toContain("TideIssueLabelFlip");
+    expect(mutateCall.variables.id).toBe("issue-uuid");
+    const labelIds = mutateCall.variables.labelIds as string[];
+    // Removed `ready-for-agent`, kept the unrelated `area:auth`, added
+    // `ready-for-human`.
+    expect(labelIds.sort()).toEqual(["label-area", "label-rfh"]);
+  });
+
+  test("preserves all unrelated labels", async () => {
+    const stub = makeFlipStub({
+      issueLabels: [
+        { id: "label-rfa", name: "ready-for-agent" },
+        { id: "label-bug", name: "bug" },
+        { id: "label-p1", name: "priority:1" },
+      ],
+    });
+
+    await flipLabelToReadyForHuman(ctx, "issue-uuid", stub.request);
+
+    const mutateCall = stub.calls[1];
+    if (!mutateCall) throw new Error("unreachable");
+    const labelIds = mutateCall.variables.labelIds as string[];
+    expect(labelIds.sort()).toEqual(["label-bug", "label-p1", "label-rfh"]);
+  });
+
+  test("is idempotent when ready-for-human is already on the issue", async () => {
+    const stub = makeFlipStub({
+      issueLabels: [
+        { id: "label-rfa", name: "ready-for-agent" },
+        { id: "label-rfh", name: "ready-for-human" },
+      ],
+    });
+
+    await flipLabelToReadyForHuman(ctx, "issue-uuid", stub.request);
+
+    const mutateCall = stub.calls[1];
+    if (!mutateCall) throw new Error("unreachable");
+    const labelIds = mutateCall.variables.labelIds as string[];
+    // ready-for-agent stripped, ready-for-human kept exactly once (no dupes).
+    expect(labelIds).toEqual(["label-rfh"]);
+  });
+
+  test("is idempotent when ready-for-agent is already absent", async () => {
+    const stub = makeFlipStub({
+      issueLabels: [{ id: "label-bug", name: "bug" }],
+    });
+
+    await flipLabelToReadyForHuman(ctx, "issue-uuid", stub.request);
+
+    const mutateCall = stub.calls[1];
+    if (!mutateCall) throw new Error("unreachable");
+    const labelIds = mutateCall.variables.labelIds as string[];
+    // No ready-for-agent to strip; ready-for-human added.
+    expect(labelIds.sort()).toEqual(["label-bug", "label-rfh"]);
+  });
+
+  test("throws when the issue id does not resolve", async () => {
+    const stub = makeFlipStub({ missingIssue: true });
+    let caught: unknown = null;
+    try {
+      await flipLabelToReadyForHuman(ctx, "missing-uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(
+      /issue with id "missing-uuid" not found/
+    );
+    // No mutation issued.
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  test("throws when the team has no ready-for-human label (hint: tide setup)", async () => {
+    const stub = makeFlipStub({
+      teamLabels: [
+        { id: "label-prd", name: "prd" },
+        { id: "label-rfa", name: "ready-for-agent" },
+      ],
+    });
+    let caught: unknown = null;
+    try {
+      await flipLabelToReadyForHuman(ctx, "uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/ready-for-human/);
+    expect((caught as Error).message).toMatch(/tide setup/);
+    // No mutation issued.
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  test("throws when issueUpdate returns success=false", async () => {
+    const stub = makeFlipStub({ mutationFailure: true });
+    let caught: unknown = null;
+    try {
+      await flipLabelToReadyForHuman(ctx, "uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/success=false/);
+  });
+});
+
+describe("linear.postComment", () => {
+  test("issues a single commentCreate mutation with the issue id and body", async () => {
+    const stub = makeGqlStub(() => ({
+      commentCreate: { success: true },
+    }));
+
+    await postComment(ctx, "issue-uuid", "Hello, Linear", stub.request);
+
+    expect(stub.calls).toHaveLength(1);
+    const call = stub.calls[0];
+    if (!call) throw new Error("unreachable");
+    expect(call.query).toContain("TideCommentCreate");
+    expect(call.variables).toEqual({
+      issueId: "issue-uuid",
+      body: "Hello, Linear",
+    });
+  });
+
+  test("throws when commentCreate returns success=false", async () => {
+    const stub = makeGqlStub(() => ({
+      commentCreate: { success: false },
+    }));
+    let caught: unknown = null;
+    try {
+      await postComment(ctx, "uuid", "body", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/success=false/);
   });
 });

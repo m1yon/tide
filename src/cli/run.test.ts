@@ -864,7 +864,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
       },
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0 });
       },
       runPrTailStep: () => {
         runPrTailStepCalls += 1;
@@ -921,7 +921,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
         // here is fine — we only care that the guard didn't preempt.
         return Promise.reject(new Error("stop here"));
       },
-      runIssueQueue: () => Promise.resolve({ completed: 0 }),
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 0 }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opted-out" },
@@ -982,7 +982,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       },
       runIssueQueue: () => {
         events.push("runIssueQueue");
-        return Promise.resolve({ completed: 1 });
+        return Promise.resolve({ completed: 1, flipped: 0 });
       },
       runPrTailStep: () => {
         events.push("runPrTailStep");
@@ -1036,7 +1036,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0 });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1072,7 +1072,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0 });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1113,7 +1113,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       runIssueQueue: (opts) => {
         capturedBaseBranch = opts.baseBranch;
-        return Promise.resolve({ completed: 1 });
+        return Promise.resolve({ completed: 1, flipped: 0 });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1127,6 +1127,131 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     });
 
     expect(capturedBaseBranch).toBe("main");
+  });
+});
+
+describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  test("logs a one-line skip notice for each `ready-for-human` direct child", async () => {
+    const picked = makePRD({ identifier: "ENG-7" });
+
+    // Two ready-for-agent items (queued) plus two ready-for-human items
+    // (skipped — typically the residue of a previous run's flip).
+    const subIssues: SubIssue[] = [
+      makeSubIssue({
+        id: "uuid-1",
+        identifier: "ENG-1",
+        title: "First",
+        labels: ["ready-for-agent"],
+      }),
+      makeSubIssue({
+        id: "uuid-skip-a",
+        identifier: "ENG-99",
+        title: "Previously blocked",
+        labels: ["ready-for-human"],
+      }),
+      makeSubIssue({
+        id: "uuid-2",
+        identifier: "ENG-2",
+        title: "Second",
+        labels: ["ready-for-agent"],
+      }),
+      makeSubIssue({
+        id: "uuid-skip-b",
+        identifier: "ENG-100",
+        title: "Previously failed",
+        labels: ["ready-for-human"],
+      }),
+    ];
+
+    await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve(subIssues),
+      runIssueQueue: () => Promise.resolve({ completed: 2, flipped: 0 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionPrdToInProgress: () => Promise.resolve(),
+    });
+
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Skipping ENG-99: ready-for-human");
+    expect(out).toContain("Skipping ENG-100: ready-for-human");
+    // Queued items are not surfaced as skips. (`:` after the identifier is
+    // the skip-line separator and disambiguates ENG-1 from ENG-100.)
+    expect(out).not.toContain("Skipping ENG-1:");
+    expect(out).not.toContain("Skipping ENG-2:");
+  });
+
+  test("logs no skip notices when there are no ready-for-human direct children", async () => {
+    const picked = makePRD({ identifier: "ENG-7" });
+
+    const subIssues: SubIssue[] = [
+      makeSubIssue({
+        id: "uuid-1",
+        identifier: "ENG-1",
+        title: "First",
+        labels: ["ready-for-agent"],
+      }),
+    ];
+
+    await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve(subIssues),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionPrdToInProgress: () => Promise.resolve(),
+    });
+
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("ready-for-human");
   });
 });
 
@@ -1168,7 +1293,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1 }),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
       runPrTailStep: tail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),

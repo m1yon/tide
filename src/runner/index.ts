@@ -3,16 +3,24 @@
 // For each Linear sub-issue in topo order, fetch its body+comments (and the
 // PRD's body once at the top) from Linear, transition the sub-issue to
 // *In Progress* in Linear, build promptArgs via the pure `buildPromptArgs`
-// helper, and call `run()` from @ai-hero/sandcastle. On the agent's
-// `<promise>DONE</promise>` signal the host transitions the sub-issue to
-// *Done*. A run that fails (no commit + no signal, or thrown error) aborts
-// the rest of the queue without further Linear writes. Sandcastle preserves
-// the worktree on disk on abort.
+// helper, and call `run()` from @ai-hero/sandcastle.
+//
+// Outcomes:
+//   - DONE + commits → host transitions the sub-issue to *Done*; queue
+//     continues.
+//   - BLOCKED → host atomically flips the sub-issue's label from
+//     `ready-for-agent` to `ready-for-human`, posts a placeholder Linear
+//     comment, and continues the queue. Workflow state stays at *In
+//     Progress*.
+//   - agent-FAIL (no commits + no completion signal, or any other
+//     non-success exit shape) → routed through the same flip + comment +
+//     continue path as BLOCKED, with a different placeholder reason.
+//   - infra-FAIL (sandcastle threw, content fetch failed, In Progress
+//     transition failed) → queue aborts without flipping any label.
+//     Sandcastle preserves the worktree on disk on abort.
 //
 // All Linear writes happen from the host. The sandbox never sees
-// LINEAR_API_KEY (ADR-0005). BLOCKED is documented in the prompt for human
-// readers but in this slice still routes through the failure path; label
-// flips + summarizer come in S5.
+// LINEAR_API_KEY (ADR-0005).
 
 import path from "node:path";
 import { run, claudeCode, type RunResult } from "@ai-hero/sandcastle";
@@ -21,6 +29,8 @@ import { log } from "@clack/prompts";
 import type { TideConfig } from "../config-loader/index.ts";
 import {
   fetchIssueContent as defaultFetchIssueContent,
+  flipLabelToReadyForHuman as defaultFlipLabelToReadyForHuman,
+  postComment as defaultPostComment,
   transitionToDone as defaultTransitionToDone,
   transitionToInProgress as defaultTransitionToInProgress,
   type LinearContext,
@@ -36,6 +46,13 @@ import { buildPromptArgs } from "../prompt-args/index.ts";
  * marker is no longer accepted.
  */
 export const DONE_SIGNAL = "<promise>DONE</promise>";
+
+/**
+ * Substring the agent emits to declare itself gracefully stuck. Sandcastle
+ * short-circuits on it just like DONE; the host distinguishes the two via
+ * `RunResult.completionSignal` and routes BLOCKED to the label-flip path.
+ */
+export const BLOCKED_SIGNAL = "<promise>BLOCKED</promise>";
 
 export interface OrderedIssue {
   /** Linear UUID — used to fetch content. */
@@ -79,16 +96,31 @@ export interface RunIssueQueueOptions {
   ) => Promise<void>;
   /** Test seam — defaults to `linear.transitionToDone`. */
   transitionToDone?: (ctx: LinearContext, issueId: string) => Promise<void>;
+  /** Test seam — defaults to `linear.flipLabelToReadyForHuman`. */
+  flipLabelToReadyForHuman?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+  /** Test seam — defaults to `linear.postComment`. */
+  postComment?: (
+    ctx: LinearContext,
+    issueId: string,
+    body: string
+  ) => Promise<void>;
   /** Test seam — defaults to sandcastle's `run`. */
   sandcastleRun?: typeof run;
 }
 
 export interface RunIssueQueueResult {
   // Number of sub-issues that ran to completion (DONE signal + at least one
-  // commit, transitioned to *Done* in Linear). Sub-issues after the abort
-  // point are not counted.
+  // commit, transitioned to *Done* in Linear). Sub-issues after an infra
+  // abort are not counted.
   completed: number;
-  // The issue that aborted the loop, if any.
+  // Number of sub-issues that were flipped to `ready-for-human` (BLOCKED or
+  // agent-FAIL). The queue continues past these; they don't count toward
+  // `completed`.
+  flipped: number;
+  // The issue that aborted the loop on an infra failure, if any.
   abortedAt?: {
     identifier: string;
     reason: string;
@@ -110,35 +142,70 @@ function buildSandbox(
  * Dispatch on the iteration's outcome:
  * - `done` — the agent emitted `<promise>DONE</promise>` and committed at
  *   least once. The host transitions the sub-issue to *Done*.
- * - `failed` — anything else (no signal, BLOCKED, DONE without commits).
- *   In this slice routes through the existing failure path: queue aborts
- *   without any Linear write. S5 will refine BLOCKED + agent-FAIL into a
- *   summarizer + label-flip + continue path.
+ * - `blocked` — the agent emitted `<promise>BLOCKED</promise>`. The host
+ *   flips the label to `ready-for-human`, posts a placeholder comment, and
+ *   continues the queue.
+ * - `agent-fail` — any other non-success exit shape (no signal at all,
+ *   DONE without commits, commits without DONE). Routed through the same
+ *   flip + comment + continue path as `blocked`, with a different
+ *   placeholder reason.
  *
- * Thrown errors are caught at the call-site and reported as infra failures.
+ * Thrown errors are caught at the call-site and reported as infra failures
+ * — those abort the queue and do not flip any label.
  */
 function classifyRun(
   result: RunResult
-): { kind: "done" } | { kind: "failed"; reason: string } {
+):
+  | { kind: "done" }
+  | { kind: "blocked" }
+  | { kind: "agent-fail"; reason: string } {
+  if (result.completionSignal === BLOCKED_SIGNAL) {
+    return { kind: "blocked" };
+  }
   if (result.completionSignal === DONE_SIGNAL && result.commits.length > 0) {
     return { kind: "done" };
   }
   if (result.completionSignal === DONE_SIGNAL) {
     return {
-      kind: "failed",
+      kind: "agent-fail",
       reason: "agent emitted DONE without committing any changes",
     };
   }
   if (result.commits.length === 0) {
     return {
-      kind: "failed",
+      kind: "agent-fail",
       reason: "agent emitted no commit and no completion signal",
     };
   }
   return {
-    kind: "failed",
+    kind: "agent-fail",
     reason: "agent committed but did not emit <promise>DONE</promise>",
   };
+}
+
+/**
+ * Build the placeholder Linear comment body posted alongside the label
+ * flip. S5 ships a one-line note; S6 will replace this with a real
+ * summarizer-agent run on the working agent's transcript.
+ */
+function buildPlaceholderComment(
+  kind: "blocked" | "agent-fail",
+  agentFailReason: string | undefined,
+  preservedWorktreePath: string | undefined
+): string {
+  const reasonLabel = kind === "blocked" ? "BLOCKED" : "FAIL";
+  const lines: string[] = [
+    `Tide flipped this to \`ready-for-human\`. Reason: ${reasonLabel}.`,
+  ];
+  if (kind === "agent-fail" && agentFailReason !== undefined) {
+    lines.push(`Detail: ${agentFailReason}.`);
+  }
+  if (preservedWorktreePath !== undefined) {
+    lines.push(
+      `Sandcastle worktree preserved at \`${preservedWorktreePath}\`.`
+    );
+  }
+  return lines.join("\n");
 }
 
 export async function runIssueQueue(
@@ -161,6 +228,9 @@ export async function runIssueQueue(
     options.transitionToInProgress ?? defaultTransitionToInProgress;
   const transitionToDoneFn =
     options.transitionToDone ?? defaultTransitionToDone;
+  const flipLabelFn =
+    options.flipLabelToReadyForHuman ?? defaultFlipLabelToReadyForHuman;
+  const postCommentFn = options.postComment ?? defaultPostComment;
   const sandcastleRun = options.sandcastleRun ?? run;
 
   // Fetch the parent body once for PRD_CONTENT — it's stable across the loop.
@@ -175,6 +245,7 @@ export async function runIssueQueue(
   const sandbox = buildSandbox(config, sandboxEnv);
 
   let completed = 0;
+  let flipped = 0;
   for (const ordered of orderedIssues) {
     log.info(`Starting ${ordered.identifier}: ${ordered.title}`);
 
@@ -186,6 +257,7 @@ export async function runIssueQueue(
       log.error(`Failed to fetch ${ordered.identifier} content: ${msg}`);
       return {
         completed,
+        flipped,
         abortedAt: {
           identifier: ordered.identifier,
           reason: `fetch failed: ${msg}`,
@@ -205,6 +277,7 @@ export async function runIssueQueue(
       );
       return {
         completed,
+        flipped,
         abortedAt: {
           identifier: ordered.identifier,
           reason: `transition to In Progress failed: ${msg}`,
@@ -231,11 +304,10 @@ export async function runIssueQueue(
         maxIterations: 3,
         branchStrategy: { type: "branch", branch },
         logging: { type: "stdout" },
-        // The agent's exit vocabulary is the DONE signal only. BLOCKED is
-        // documented in the prompt for human readers but is not surfaced to
-        // sandcastle as a stop condition in this slice — its short-circuit
-        // path is added with the summarizer in S5.
-        completionSignal: DONE_SIGNAL,
+        // Agent exit vocabulary: DONE for success, BLOCKED for graceful
+        // give-up. Sandcastle short-circuits on either; the host
+        // distinguishes them via `RunResult.completionSignal`.
+        completionSignal: [DONE_SIGNAL, BLOCKED_SIGNAL],
         hooks: {
           sandbox: {
             onSandboxReady: config.hooks.onSandboxReady,
@@ -247,6 +319,7 @@ export async function runIssueQueue(
       log.error(`${ordered.identifier} threw: ${msg}`);
       return {
         completed,
+        flipped,
         abortedAt: {
           identifier: ordered.identifier,
           reason: `run() threw: ${msg}`,
@@ -255,16 +328,54 @@ export async function runIssueQueue(
     }
 
     const verdict = classifyRun(result);
-    if (verdict.kind === "failed") {
-      log.error(`${ordered.identifier} aborted: ${verdict.reason}`);
-      return {
-        completed,
-        abortedAt: {
-          identifier: ordered.identifier,
-          reason: verdict.reason,
-          preservedWorktreePath: result.preservedWorktreePath,
-        },
-      };
+    if (verdict.kind === "blocked" || verdict.kind === "agent-fail") {
+      const reason = verdict.kind === "blocked" ? "BLOCKED" : "FAIL";
+      const detail = verdict.kind === "agent-fail" ? verdict.reason : undefined;
+      log.warn(
+        `${ordered.identifier} ${reason}${detail ? `: ${detail}` : ""} — flipping to ready-for-human and continuing`
+      );
+      // Flip the label first, then post the comment. Order matters: the
+      // label flip is the queue-gating signal (a re-run skips
+      // ready-for-human items), so it must land before we spend a write
+      // budget on the comment. A failure on either is an infra failure
+      // and aborts.
+      try {
+        await flipLabelFn(linearCtx, ordered.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(
+          `Failed to flip ${ordered.identifier} to ready-for-human: ${msg}`
+        );
+        return {
+          completed,
+          flipped,
+          abortedAt: {
+            identifier: ordered.identifier,
+            reason: `label flip failed: ${msg}`,
+          },
+        };
+      }
+      const commentBody = buildPlaceholderComment(
+        verdict.kind,
+        detail,
+        result.preservedWorktreePath
+      );
+      try {
+        await postCommentFn(linearCtx, ordered.id, commentBody);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`Failed to post comment on ${ordered.identifier}: ${msg}`);
+        return {
+          completed,
+          flipped,
+          abortedAt: {
+            identifier: ordered.identifier,
+            reason: `comment post failed: ${msg}`,
+          },
+        };
+      }
+      flipped++;
+      continue;
     }
 
     // DONE signalled and committed → transition the sub-issue to *Done*.
@@ -276,6 +387,7 @@ export async function runIssueQueue(
       log.error(`Failed to transition ${ordered.identifier} to Done: ${msg}`);
       return {
         completed,
+        flipped,
         abortedAt: {
           identifier: ordered.identifier,
           reason: `transition to Done failed: ${msg}`,
@@ -289,5 +401,5 @@ export async function runIssueQueue(
     );
   }
 
-  return { completed };
+  return { completed, flipped };
 }

@@ -67,6 +67,7 @@ import {
 import { pickPRD as defaultPickPRD } from "../selector/index.ts";
 
 const READY_FOR_AGENT = "ready-for-agent";
+const READY_FOR_HUMAN = "ready-for-human";
 const TERMINAL_STATE_TYPES = new Set(["completed", "canceled"]);
 
 export interface RunOptions {
@@ -419,6 +420,16 @@ export async function runQueueAfterPick(
     log.info("Topo-ordered queue:");
     for (const o of queue.ordered) {
       log.message(`  ${o.identifier} ${o.title}`);
+    }
+  }
+
+  // Surface direct children flagged `ready-for-human` (typically the
+  // residue of a previous run's BLOCKED / agent-FAIL flip) as a one-line
+  // skip notice so the user knows what is *not* in the queue. These are
+  // already excluded from `queue.ordered` by `buildOrderedQueue`.
+  for (const s of subIssues) {
+    if (s.labels.includes(READY_FOR_HUMAN)) {
+      log.info(`Skipping ${s.identifier}: ready-for-human`);
     }
   }
 

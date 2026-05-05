@@ -8,6 +8,11 @@
 //   - fetchIssueContent(ctx, issueId): the issue's description (markdown
 //     body) and the bodies of its comments. Used to hydrate per-iteration
 //     prompt args.
+//   - flipLabelToReadyForHuman(ctx, issueId): atomically remove the
+//     `ready-for-agent` label and add `ready-for-human` in a single
+//     `issueUpdate` mutation. Used on BLOCKED + agent-FAIL.
+//   - postComment(ctx, issueId, body): create a Linear comment on the issue.
+//     Used to post a placeholder note on BLOCKED + agent-FAIL.
 //   - setupLabels(ctx): idempotently ensure the three canonical labels exist
 //     on the configured team. Used by the `tide setup` subcommand.
 //   - pickWorkflowStateByType(states, type): pure helper. Given a set of
@@ -586,4 +591,134 @@ export async function transitionToDone(
 ): Promise<void> {
   const request = _request ?? rawRequest(ctx.apiKey);
   await transitionIssueTo(ctx, issueId, "completed", request);
+}
+
+const ISSUE_LABELS_FOR_FLIP_QUERY = /* GraphQL */ `
+  query TideIssueLabelsForFlip($id: String!) {
+    issue(id: $id) {
+      id
+      labels(first: 50) {
+        nodes {
+          id
+          name
+        }
+      }
+      team {
+        labels(first: 200) {
+          nodes {
+            id
+            name
+          }
+        }
+      }
+    }
+  }
+`;
+
+const ISSUE_LABEL_FLIP_MUTATION = /* GraphQL */ `
+  mutation TideIssueLabelFlip($id: String!, $labelIds: [String!]!) {
+    issueUpdate(id: $id, input: { labelIds: $labelIds }) {
+      success
+    }
+  }
+`;
+
+interface IssueLabelsForFlipNode {
+  id: string;
+  labels: { nodes: { id: string; name: string }[] };
+  team: {
+    labels: { nodes: { id: string; name: string }[] };
+  };
+}
+
+/**
+ * Atomically flip the given Linear issue's `ready-for-agent` label to
+ * `ready-for-human` in a single `issueUpdate` mutation. The mutation passes
+ * the full new label-id set, so Linear records this as one edit on the
+ * issue's timeline rather than a remove-then-add pair.
+ *
+ * Behaviour:
+ * - Removes `ready-for-agent` if present (idempotent if absent).
+ * - Adds `ready-for-human` if not already present (idempotent if present).
+ * - All other labels are preserved unchanged.
+ *
+ * Throws when the issue id does not resolve, when the team has no
+ * `ready-for-human` label (run `tide setup`), or when the mutation reports
+ * `success: false`.
+ *
+ * `_request` is a test seam — production callers omit it.
+ */
+export async function flipLabelToReadyForHuman(
+  ctx: LinearContext,
+  issueId: string,
+  _request?: LinearGqlRequest
+): Promise<void> {
+  const request = _request ?? rawRequest(ctx.apiKey);
+  const data = await request<{ issue: IssueLabelsForFlipNode | null }>(
+    ISSUE_LABELS_FOR_FLIP_QUERY,
+    { id: issueId }
+  );
+  if (!data.issue) {
+    throw new Error(`Linear issue with id "${issueId}" not found.`);
+  }
+
+  const teamLabel = data.issue.team.labels.nodes.find(
+    (l) => l.name === READY_FOR_HUMAN_LABEL
+  );
+  if (!teamLabel) {
+    throw new Error(
+      `Linear team has no "${READY_FOR_HUMAN_LABEL}" label. Run \`tide setup\` to provision it.`
+    );
+  }
+
+  const nextLabelIds: string[] = [];
+  let alreadyHasReadyForHuman = false;
+  for (const l of data.issue.labels.nodes) {
+    if (l.name === READY_FOR_AGENT_LABEL) continue;
+    if (l.name === READY_FOR_HUMAN_LABEL) alreadyHasReadyForHuman = true;
+    nextLabelIds.push(l.id);
+  }
+  if (!alreadyHasReadyForHuman) nextLabelIds.push(teamLabel.id);
+
+  const mutationResult = await request<{
+    issueUpdate: { success: boolean };
+  }>(ISSUE_LABEL_FLIP_MUTATION, { id: issueId, labelIds: nextLabelIds });
+  if (!mutationResult.issueUpdate.success) {
+    throw new Error(
+      `Linear issueUpdate (label flip) for "${issueId}" returned success=false.`
+    );
+  }
+}
+
+const COMMENT_CREATE_MUTATION = /* GraphQL */ `
+  mutation TideCommentCreate($issueId: String!, $body: String!) {
+    commentCreate(input: { issueId: $issueId, body: $body }) {
+      success
+    }
+  }
+`;
+
+/**
+ * Post a comment to the given Linear issue. Used by the runner on BLOCKED /
+ * agent-FAIL to leave a placeholder note explaining the label flip.
+ *
+ * Throws when the mutation reports `success: false`.
+ *
+ * `_request` is a test seam — production callers omit it.
+ */
+export async function postComment(
+  ctx: LinearContext,
+  issueId: string,
+  body: string,
+  _request?: LinearGqlRequest
+): Promise<void> {
+  const request = _request ?? rawRequest(ctx.apiKey);
+  const result = await request<{
+    commentCreate: { success: boolean };
+  }>(COMMENT_CREATE_MUTATION, { issueId, body });
+  if (!result.commentCreate.success) {
+    throw new Error(
+      `Linear commentCreate for "${issueId}" returned success=false.`
+    );
+  }
 }
