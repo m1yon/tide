@@ -4,6 +4,7 @@ import { build } from "./build.ts";
 import { doctor } from "./doctor.ts";
 import { init } from "./init.ts";
 import { tideRun } from "./run.ts";
+import { setup } from "./setup.ts";
 
 // VERSION is replaced at compile time via `bun build --compile --define`.
 // When running uncompiled (`bun run src/cli/index.ts`), the substitution does
@@ -19,6 +20,7 @@ Usage:
 Commands:
   run      Run the PRD-rooted, Linear-tracked agent flow for the current repo
   init     Scaffold a minimal .tide/ directory in the current repo
+  setup    Create the Linear labels required by the Linear-native flow
   doctor   Check that the local environment is ready to run tide
   build    Force-rebuild the docker image used by tide run
 
@@ -29,9 +31,15 @@ Options:
 Run \`tide <command> --help\` for command-specific help (once subcommands ship).
 `;
 
-type Subcommand = "run" | "init" | "doctor" | "build";
+type Subcommand = "run" | "init" | "setup" | "doctor" | "build";
 
-const SUBCOMMANDS: readonly Subcommand[] = ["run", "init", "doctor", "build"];
+const SUBCOMMANDS: readonly Subcommand[] = [
+  "run",
+  "init",
+  "setup",
+  "doctor",
+  "build",
+];
 
 function isSubcommand(value: string): value is Subcommand {
   return (SUBCOMMANDS as readonly string[]).includes(value);
@@ -72,6 +80,9 @@ export function run(argv: readonly string[]): number | Promise<number> {
   if (isSubcommand(first)) {
     if (first === "init") {
       return init();
+    }
+    if (first === "setup") {
+      return setup();
     }
     if (first === "doctor") {
       return doctor();

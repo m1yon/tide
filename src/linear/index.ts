@@ -10,6 +10,9 @@
 //     `updatedAt` desc. The returned shape carries everything `tide run`
 //     needs to use the issue as the run's tracker without a second
 //     round-trip.
+//   - setupLabels(...): idempotently ensure the three labels required by the
+//     Linear-native flow (`prd`, `ready-for-agent`, `ready-for-human`) exist
+//     on the configured team. Used by the `tide setup` subcommand.
 //
 // The `PRD` label is hardcoded, scoped to the configured Linear team, and
 // auto-created lazily on first use if missing. See
@@ -33,6 +36,24 @@ const ACTIVE_STATE_TYPES = [
   "unstarted",
   "started",
 ] as const;
+
+/**
+ * Canonical lowercase label names required by the Linear-native flow.
+ * `tide setup` ensures all three exist on the configured team.
+ */
+export const SETUP_LABEL_NAMES = [
+  "prd",
+  "ready-for-agent",
+  "ready-for-human",
+] as const;
+export type SetupLabelName = (typeof SETUP_LABEL_NAMES)[number];
+
+export interface SetupLabelResult {
+  /** Canonical label name. */
+  name: SetupLabelName;
+  /** True if this label was created by this run; false if it already existed. */
+  created: boolean;
+}
 
 export interface LinearResult {
   branchName: string;
@@ -244,4 +265,75 @@ export async function listExistingPRDs(
     url: issue.url,
     updatedAt: issue.updatedAt,
   }));
+}
+
+/**
+ * Minimal subset of `LinearClient` consumed by `setupLabels`. Surfaced as a
+ * named seam so tests can drive the function without mocking the entire SDK.
+ */
+export interface SetupLabelsClient {
+  teams(args: {
+    filter: { key: { eq: string } };
+  }): Promise<{ nodes: { id: string }[] }>;
+  issueLabels(args: {
+    filter: { team: { id: { eq: string } }; name: { in: string[] } };
+  }): Promise<{ nodes: { name: string }[] }>;
+  createIssueLabel(args: {
+    teamId: string;
+    name: string;
+  }): Promise<{ success: boolean }>;
+}
+
+/**
+ * Idempotently ensure the three labels required by the Linear-native flow
+ * (`prd`, `ready-for-agent`, `ready-for-human`) exist on the configured team.
+ *
+ * Returns one entry per canonical label, in `SETUP_LABEL_NAMES` order,
+ * indicating whether it was created by this call (`created: true`) or was
+ * already present (`created: false`). Missing labels are created with the
+ * canonical lowercase names; existing labels (matched exactly, case-sensitive)
+ * are left untouched.
+ *
+ * `_client` is a test seam — production callers omit it and the real
+ * `LinearClient` is constructed from `ctx.apiKey`.
+ */
+export async function setupLabels(
+  ctx: LinearContext,
+  _client?: SetupLabelsClient
+): Promise<SetupLabelResult[]> {
+  const c: SetupLabelsClient = _client ?? client(ctx.apiKey);
+  const teams = await c.teams({ filter: { key: { eq: ctx.teamKey } } });
+  const team = teams.nodes[0];
+  if (!team) {
+    throw new Error(
+      `Linear team with key "${ctx.teamKey}" not found. Check the team key in Linear settings ` +
+        `or update the linear.team field in .tide/config.ts.`
+    );
+  }
+  const teamId = team.id;
+
+  const existing = await c.issueLabels({
+    filter: {
+      team: { id: { eq: teamId } },
+      name: { in: [...SETUP_LABEL_NAMES] },
+    },
+  });
+  const existingNames = new Set<string>();
+  for (const node of existing.nodes) existingNames.add(node.name);
+
+  const results: SetupLabelResult[] = [];
+  for (const name of SETUP_LABEL_NAMES) {
+    if (existingNames.has(name)) {
+      results.push({ name, created: false });
+      continue;
+    }
+    const payload = await c.createIssueLabel({ teamId, name });
+    if (!payload.success) {
+      throw new Error(
+        `Linear createIssueLabel for "${name}" returned success=false.`
+      );
+    }
+    results.push({ name, created: true });
+  }
+  return results;
 }
