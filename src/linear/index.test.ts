@@ -7,6 +7,8 @@ import {
   listPRDs,
   pickWorkflowStateByType,
   setupLabels,
+  transitionToDone,
+  transitionToInProgress,
   type LinearContext,
   type LinearGqlRequest,
   type ListPRDsClient,
@@ -640,5 +642,174 @@ describe("linear.fetchIssueContent", () => {
     expect((caught as Error).message).toMatch(
       /issue with id "missing-uuid" not found/
     );
+  });
+});
+
+interface TransitionStubOptions {
+  /** The team's workflow states. */
+  states?: { id: string; type: string; position: number }[];
+  /** If true, the issue lookup returns null. */
+  missingIssue?: boolean;
+  /** If true, issueUpdate returns success=false. */
+  mutationFailure?: boolean;
+}
+
+function makeTransitionStub(opts: TransitionStubOptions = {}): {
+  request: LinearGqlRequest;
+  calls: GqlCall[];
+} {
+  const states = opts.states ?? [
+    { id: "state-todo", type: "unstarted", position: 0 },
+    { id: "state-doing", type: "started", position: 1 },
+    { id: "state-done", type: "completed", position: 2 },
+  ];
+  return makeGqlStub((call) => {
+    if (call.query.includes("TideIssueTeamStates")) {
+      if (opts.missingIssue) return { issue: null };
+      return {
+        issue: {
+          id: call.variables.id,
+          team: { states: { nodes: states } },
+        },
+      };
+    }
+    if (call.query.includes("TideIssueTransition")) {
+      return {
+        issueUpdate: { success: !opts.mutationFailure },
+      };
+    }
+    throw new Error(`unexpected query: ${call.query}`);
+  });
+}
+
+describe("linear.transitionToInProgress", () => {
+  test("resolves the lowest-position `started`-type state and updates the issue", async () => {
+    const stub = makeTransitionStub({
+      states: [
+        { id: "review", type: "started", position: 5 },
+        { id: "doing", type: "started", position: 1 },
+        { id: "done", type: "completed", position: 9 },
+      ],
+    });
+
+    await transitionToInProgress(ctx, "issue-uuid", stub.request);
+
+    expect(stub.calls).toHaveLength(2);
+    const fetchCall = stub.calls[0];
+    const mutateCall = stub.calls[1];
+    if (!fetchCall || !mutateCall) throw new Error("unreachable");
+    expect(fetchCall.query).toContain("TideIssueTeamStates");
+    expect(fetchCall.variables).toEqual({ id: "issue-uuid" });
+    expect(mutateCall.query).toContain("TideIssueTransition");
+    // Picked state is the lowest-position `started` state, not the
+    // `completed` one — verifying state.type-driven resolution.
+    expect(mutateCall.variables).toEqual({
+      id: "issue-uuid",
+      stateId: "doing",
+    });
+  });
+
+  test("ignores the workflow-state name when resolving (renames don't break)", async () => {
+    // Team renamed "In Progress" to "Doing". Resolution by `type` still works.
+    const stub = makeTransitionStub({
+      states: [
+        { id: "doing", type: "started", position: 1 },
+        { id: "done", type: "completed", position: 2 },
+      ],
+    });
+
+    await transitionToInProgress(ctx, "issue-uuid", stub.request);
+
+    const mutateCall = stub.calls[1];
+    if (!mutateCall) throw new Error("unreachable");
+    expect(mutateCall.variables).toEqual({
+      id: "issue-uuid",
+      stateId: "doing",
+    });
+  });
+
+  test("throws when the issue id does not resolve", async () => {
+    const stub = makeTransitionStub({ missingIssue: true });
+    let caught: unknown = null;
+    try {
+      await transitionToInProgress(ctx, "missing-uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(
+      /issue with id "missing-uuid" not found/
+    );
+    // No mutation issued.
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  test("throws when the team has no `started`-type state", async () => {
+    const stub = makeTransitionStub({
+      states: [
+        { id: "todo", type: "unstarted", position: 0 },
+        { id: "done", type: "completed", position: 9 },
+      ],
+    });
+    let caught: unknown = null;
+    try {
+      await transitionToInProgress(ctx, "uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/started/);
+    // No mutation issued.
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  test("throws when issueUpdate returns success=false", async () => {
+    const stub = makeTransitionStub({ mutationFailure: true });
+    let caught: unknown = null;
+    try {
+      await transitionToInProgress(ctx, "uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/success=false/);
+  });
+});
+
+describe("linear.transitionToDone", () => {
+  test("resolves the lowest-position `completed`-type state and updates the issue", async () => {
+    const stub = makeTransitionStub({
+      states: [
+        { id: "doing", type: "started", position: 0 },
+        { id: "shipped", type: "completed", position: 5 },
+        { id: "done", type: "completed", position: 1 },
+      ],
+    });
+
+    await transitionToDone(ctx, "issue-uuid", stub.request);
+
+    const mutateCall = stub.calls[1];
+    if (!mutateCall) throw new Error("unreachable");
+    expect(mutateCall.variables).toEqual({
+      id: "issue-uuid",
+      stateId: "done",
+    });
+  });
+
+  test("throws when the team has no `completed`-type state", async () => {
+    const stub = makeTransitionStub({
+      states: [
+        { id: "todo", type: "unstarted", position: 0 },
+        { id: "doing", type: "started", position: 1 },
+      ],
+    });
+    let caught: unknown = null;
+    try {
+      await transitionToDone(ctx, "uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/completed/);
   });
 });

@@ -20,11 +20,13 @@ describe("buildPromptArgs", () => {
       issue,
       parent: baseParent,
       branch: "feature/mec-1-foo",
+      baseBranch: "master",
     });
 
-    // All six keys present.
+    // All seven keys present.
     expect(Object.keys(args).sort()).toEqual(
       [
+        "BASE_BRANCH",
         "BRANCH",
         "ISSUE_CONTENT",
         "ISSUE_ID",
@@ -39,6 +41,7 @@ describe("buildPromptArgs", () => {
     expect(args.PARENT_ID).toBe("ENG-100");
     expect(args.ISSUE_TITLE).toBe("Sub-issue four");
     expect(args.BRANCH).toBe("feature/mec-1-foo");
+    expect(args.BASE_BRANCH).toBe("master");
     expect(args.PRD_CONTENT).toBe("This PRD describes the example feature.");
 
     // ISSUE_CONTENT markdown structure.
@@ -69,6 +72,7 @@ describe("buildPromptArgs", () => {
       issue,
       parent: baseParent,
       branch: "feature/mec-2-bar",
+      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Body");
@@ -87,6 +91,7 @@ describe("buildPromptArgs", () => {
       issue,
       parent: baseParent,
       branch: "feature/mec-3-baz",
+      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Title");
@@ -105,6 +110,7 @@ describe("buildPromptArgs", () => {
       issue,
       parent: baseParent,
       branch: "feature/mec-4-qux",
+      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("`code`");

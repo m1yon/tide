@@ -937,6 +937,199 @@ describe("runQueueAfterPick — feature-branch guard", () => {
   });
 });
 
+describe("runQueueAfterPick — PRD In Progress transition", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  test("transitions the PRD to In Progress after both confirms before the queue runs", async () => {
+    const picked = makePRD({ id: "uuid-eng-7", identifier: "ENG-7" });
+
+    const events: string[] = [];
+    const transitionCalls: { ctx: LinearContext; issueId: string }[] = [];
+
+    await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        events.push("fetchSubIssues");
+        return Promise.resolve([] as SubIssue[]);
+      },
+      runIssueQueue: () => {
+        events.push("runIssueQueue");
+        return Promise.resolve({ completed: 1 });
+      },
+      runPrTailStep: () => {
+        events.push("runPrTailStep");
+        return Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "ok",
+          exitCode: 0,
+        } satisfies PrTailStepResult);
+      },
+      confirmRun: () => {
+        events.push("confirmRun");
+        return Promise.resolve(true);
+      },
+      confirmPr: () => {
+        events.push("confirmPr");
+        return Promise.resolve(true);
+      },
+      transitionPrdToInProgress: (ctx, issueId) => {
+        events.push("transitionPrdToInProgress");
+        transitionCalls.push({ ctx, issueId });
+        return Promise.resolve();
+      },
+    });
+
+    expect(transitionCalls).toHaveLength(1);
+    expect(transitionCalls[0]?.issueId).toBe("uuid-eng-7");
+    // Order: confirms run first, THEN PRD transitions, THEN queue starts.
+    const tIdx = events.indexOf("transitionPrdToInProgress");
+    const cRunIdx = events.indexOf("confirmRun");
+    const cPrIdx = events.indexOf("confirmPr");
+    const qIdx = events.indexOf("runIssueQueue");
+    expect(cRunIdx).toBeGreaterThanOrEqual(0);
+    expect(cPrIdx).toBeGreaterThan(cRunIdx);
+    expect(tIdx).toBeGreaterThan(cPrIdx);
+    expect(qIdx).toBeGreaterThan(tIdx);
+  });
+
+  test("does not transition the PRD when the user cancels at the run confirm", async () => {
+    const picked = makePRD({ id: "uuid-eng-7", identifier: "ENG-7" });
+    let transitionCalls = 0;
+    let runIssueQueueCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0 });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(false),
+      confirmPr: () => Promise.resolve(true),
+      transitionPrdToInProgress: () => {
+        transitionCalls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(transitionCalls).toBe(0);
+    expect(runIssueQueueCalls).toBe(0);
+  });
+
+  test("aborts cleanly when the PRD transition fails (no queue run)", async () => {
+    const picked = makePRD({ id: "uuid-eng-7", identifier: "ENG-7" });
+    let runIssueQueueCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0 });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionPrdToInProgress: () =>
+        Promise.reject(new Error("Linear API key invalid")),
+    });
+
+    expect(code).toBe(1);
+    expect(runIssueQueueCalls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Failed to transition PRD to In Progress");
+    expect(out).toContain("Linear API key invalid");
+  });
+
+  test("forwards baseBranch through to runIssueQueue", async () => {
+    const picked = makePRD({
+      id: "uuid-eng-7",
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let capturedBaseBranch: string | undefined;
+
+    await runQueueAfterPick({
+      picked,
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "main",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: (opts) => {
+        capturedBaseBranch = opts.baseBranch;
+        return Promise.resolve({ completed: 1 });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionPrdToInProgress: () => Promise.resolve(),
+    });
+
+    expect(capturedBaseBranch).toBe("main");
+  });
+});
+
 describe("runQueueAfterPick — end-of-run no-merge warning", () => {
   type WriteFn = typeof process.stdout.write;
   let stdoutChunks: string[];
@@ -979,6 +1172,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
       runPrTailStep: tail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
+      transitionPrdToInProgress: () => Promise.resolve(),
     };
   }
 

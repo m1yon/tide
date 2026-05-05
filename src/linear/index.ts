@@ -481,3 +481,109 @@ export async function fetchIssueContent(
     comments: data.issue.comments.nodes.map((c) => c.body),
   };
 }
+
+const ISSUE_TEAM_STATES_QUERY = /* GraphQL */ `
+  query TideIssueTeamStates($id: String!) {
+    issue(id: $id) {
+      id
+      team {
+        states(first: 100) {
+          nodes {
+            id
+            type
+            position
+          }
+        }
+      }
+    }
+  }
+`;
+
+const ISSUE_TRANSITION_MUTATION = /* GraphQL */ `
+  mutation TideIssueTransition($id: String!, $stateId: String!) {
+    issueUpdate(id: $id, input: { stateId: $stateId }) {
+      success
+    }
+  }
+`;
+
+interface IssueTeamStatesNode {
+  id: string;
+  team: {
+    states: {
+      nodes: { id: string; type: string; position: number }[];
+    };
+  };
+}
+
+async function transitionIssueTo(
+  ctx: LinearContext,
+  issueId: string,
+  targetStateType: "started" | "completed",
+  request: LinearGqlRequest
+): Promise<void> {
+  const data = await request<{ issue: IssueTeamStatesNode | null }>(
+    ISSUE_TEAM_STATES_QUERY,
+    { id: issueId }
+  );
+  if (!data.issue) {
+    throw new Error(`Linear issue with id "${issueId}" not found.`);
+  }
+  const stateId = pickWorkflowStateByType(
+    data.issue.team.states.nodes,
+    targetStateType
+  );
+  if (stateId === undefined) {
+    throw new Error(
+      `No workflow state with type "${targetStateType}" exists on the team for issue "${issueId}". ` +
+        `Add or restore a "${targetStateType}"-type state in Linear's team settings.`
+    );
+  }
+  const mutationResult = await request<{
+    issueUpdate: { success: boolean };
+  }>(ISSUE_TRANSITION_MUTATION, { id: issueId, stateId });
+  if (!mutationResult.issueUpdate.success) {
+    throw new Error(
+      `Linear issueUpdate for "${issueId}" returned success=false.`
+    );
+  }
+}
+
+/**
+ * Transition the given Linear issue to its team's lowest-position
+ * `started`-type workflow state ("In Progress" by default). The state is
+ * resolved by `state.type`, not by name, so per-team renames don't break
+ * the transition.
+ *
+ * Throws when the issue id does not resolve, when the team has no
+ * `started`-type state, or when the SDK reports `success: false`.
+ *
+ * `_request` is a test seam — production callers omit it.
+ */
+export async function transitionToInProgress(
+  ctx: LinearContext,
+  issueId: string,
+  _request?: LinearGqlRequest
+): Promise<void> {
+  const request = _request ?? rawRequest(ctx.apiKey);
+  await transitionIssueTo(ctx, issueId, "started", request);
+}
+
+/**
+ * Transition the given Linear issue to its team's lowest-position
+ * `completed`-type workflow state ("Done" by default). State resolved by
+ * `state.type`, not name.
+ *
+ * Throws when the issue id does not resolve, when the team has no
+ * `completed`-type state, or when the SDK reports `success: false`.
+ *
+ * `_request` is a test seam — production callers omit it.
+ */
+export async function transitionToDone(
+  ctx: LinearContext,
+  issueId: string,
+  _request?: LinearGqlRequest
+): Promise<void> {
+  const request = _request ?? rawRequest(ctx.apiKey);
+  await transitionIssueTo(ctx, issueId, "completed", request);
+}

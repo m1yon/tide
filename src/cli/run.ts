@@ -43,6 +43,7 @@ import type { GhRepo } from "../github/index.ts";
 import {
   fetchSubIssues as defaultFetchSubIssues,
   listPRDs as defaultListPRDs,
+  transitionToInProgress as defaultTransitionToInProgress,
   type LinearContext,
   type PRD,
   type SubIssue,
@@ -114,6 +115,13 @@ export interface RunQueueAfterPickOptions {
   confirmRun?: (count: number, branch: string) => Promise<boolean>;
   /** Test seam — clack `confirm` for "Create a PR at the end?". */
   confirmPr?: () => Promise<boolean>;
+  /** Test seam — defaults to `linear.transitionToInProgress`. Used to
+   * transition the PRD itself to *In Progress* once both pre-flight confirms
+   * have been answered. */
+  transitionPrdToInProgress?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
 }
 
 export interface RunPrTailStepOptions {
@@ -353,6 +361,8 @@ export async function runQueueAfterPick(
   const runPrTailStepFn = opts.runPrTailStep ?? runPrTailStep;
   const confirmRunFn = opts.confirmRun ?? defaultConfirmRun;
   const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
+  const transitionPrdToInProgressFn =
+    opts.transitionPrdToInProgress ?? defaultTransitionToInProgress;
 
   // Pre-flight: refuse to run from the picked PRD's feature branch. The base
   // branch we resolved at startup is whatever the user invoked `tide run`
@@ -420,11 +430,25 @@ export async function runQueueAfterPick(
 
   const prCreationConfirmed = await confirmPrFn();
 
+  // Transition the PRD itself to *In Progress* once the user has committed
+  // to running the queue. A cancelled pre-flight (above) leaves the PRD
+  // untouched. A failure here is an infra failure — no Linear writes have
+  // happened on sub-issues yet, so we abort cleanly.
+  try {
+    await transitionPrdToInProgressFn(opts.linearCtx, opts.picked.id);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(`Failed to transition PRD to In Progress: ${msg}`);
+    outro("Aborted.");
+    return 1;
+  }
+
   const queueResult = await runIssueQueueFn({
     parentIdentifier: opts.picked.identifier,
     parentId: opts.picked.id,
     orderedIssues,
     branch,
+    baseBranch: opts.baseBranch,
     linearCtx: opts.linearCtx,
     repoRoot: opts.repoRoot,
     config: opts.config,
