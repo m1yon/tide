@@ -6,6 +6,7 @@ import {
   fetchSubIssues,
   flipLabelToReadyForHuman,
   listPRDs,
+  listStandaloneIssues,
   pickWorkflowStateByType,
   postComment,
   setupLabels,
@@ -15,6 +16,8 @@ import {
   type LinearGqlRequest,
   type ListPRDsClient,
   type ListPRDsIssueFilter,
+  type ListStandaloneIssuesClient,
+  type ListStandaloneIssuesFilter,
   type SetupLabelsClient,
 } from "./index.ts";
 
@@ -286,7 +289,7 @@ function buildListPRDsStub(options: ListPRDsStubOptions = {}): ListPRDsStub {
 }
 
 describe("linear.listPRDs", () => {
-  test("queries with prd + ready-for-agent labels and non-terminal state.type", async () => {
+  test("queries with the prd label and non-terminal state.type (no ready-for-agent gate on the PRD itself)", async () => {
     const stub = buildListPRDsStub({
       prdNodes: [],
       states: [],
@@ -303,13 +306,16 @@ describe("linear.listPRDs", () => {
     // Team filter pinned.
     expect(filter.team?.id.eq).toBe("team-ENG");
 
-    // Both labels required (compound AND, so issues must carry both).
+    // Only the `prd` label is required on the PRD itself. PRDs no longer
+    // carry `ready-for-agent` directly under the new flow — that label
+    // marks an entry-point unit of work (a PRD's sub-issue or a Standalone
+    // Issue), not a planning unit.
     expect(filter.and).toBeDefined();
     const labelClauses = (filter.and ?? [])
       .map((c) => c.labels?.name.eq)
       .filter((n): n is string => typeof n === "string")
       .sort();
-    expect(labelClauses).toEqual(["prd", "ready-for-agent"]);
+    expect(labelClauses).toEqual(["prd"]);
 
     // Non-terminal state.type filter applied.
     const stateTypes = filter.state?.type.in;
@@ -320,6 +326,41 @@ describe("linear.listPRDs", () => {
 
     // Ordered by updatedAt desc.
     expect(stub.issuesOrderBys[0]).toBe(PaginationOrderBy.UpdatedAt);
+  });
+
+  test("excludes PRDs with zero `ready-for-agent` direct children (Standalone PRDs)", async () => {
+    // A `prd`-labeled issue with no triaged sub-issues yet is a "Standalone
+    // PRD" and must not appear in the picker.
+    const stub = buildListPRDsStub({
+      prdNodes: [
+        {
+          id: "issue-with-children",
+          identifier: "ENG-1",
+          title: "Has triaged work",
+          stateId: undefined,
+          branchName: "b",
+          url: "u",
+          updatedAt: new Date(0),
+        },
+        {
+          id: "issue-pre-triage",
+          identifier: "ENG-2",
+          title: "Standalone PRD",
+          stateId: undefined,
+          branchName: "b",
+          url: "u",
+          updatedAt: new Date(0),
+        },
+      ],
+      childCountsByParent: {
+        "issue-with-children": { "ready-for-agent": 2, "ready-for-human": 0 },
+        "issue-pre-triage": { "ready-for-agent": 0, "ready-for-human": 0 },
+      },
+    });
+
+    const prds = await listPRDs(ctx, stub.client);
+
+    expect(prds.map((p) => p.identifier)).toEqual(["ENG-1"]);
   });
 
   test("returns each PRD with sub-issue counts split by ready-for-agent / ready-for-human", async () => {
@@ -355,7 +396,7 @@ describe("linear.listPRDs", () => {
       ],
       childCountsByParent: {
         "issue-1": { "ready-for-agent": 3, "ready-for-human": 1 },
-        "issue-2": { "ready-for-agent": 0, "ready-for-human": 2 },
+        "issue-2": { "ready-for-agent": 2, "ready-for-human": 2 },
       },
     });
 
@@ -377,7 +418,7 @@ describe("linear.listPRDs", () => {
 
     expect(b.identifier).toBe("ENG-2");
     expect(b.state).toBe("Backlog");
-    expect(b.readyForAgentCount).toBe(0);
+    expect(b.readyForAgentCount).toBe(2);
     expect(b.readyForHumanCount).toBe(2);
   });
 
@@ -446,10 +487,171 @@ describe("linear.listPRDs", () => {
         },
       ],
       states: [],
-      childCountsByParent: { "issue-x": {} },
+      childCountsByParent: { "issue-x": { "ready-for-agent": 1 } },
     });
     const prds = await listPRDs(ctx, stub.client);
     expect(prds[0]?.state).toBe("");
+  });
+});
+
+interface ListStandaloneStubOptions {
+  knownTeamKeys?: readonly string[];
+  issueNodes?: {
+    id: string;
+    identifier: string;
+    title: string;
+    stateId: string | undefined;
+    branchName: string;
+    url: string;
+    updatedAt: Date;
+  }[];
+  states?: { id: string; name: string; type: string; position: number }[];
+}
+
+interface ListStandaloneStub {
+  client: ListStandaloneIssuesClient;
+  issuesFilters: ListStandaloneIssuesFilter[];
+  issuesOrderBys: (PaginationOrderBy | undefined)[];
+}
+
+function buildListStandaloneStub(
+  options: ListStandaloneStubOptions = {}
+): ListStandaloneStub {
+  const knownTeamKeys = options.knownTeamKeys ?? ["ENG"];
+  const issuesFilters: ListStandaloneIssuesFilter[] = [];
+  const issuesOrderBys: (PaginationOrderBy | undefined)[] = [];
+
+  const client: ListStandaloneIssuesClient = {
+    teams: ({ filter }) => {
+      const key = filter.key.eq;
+      if (!knownTeamKeys.includes(key)) {
+        return Promise.resolve({ nodes: [] });
+      }
+      return Promise.resolve({ nodes: [{ id: `team-${key}` }] });
+    },
+    workflowStates: () => Promise.resolve({ nodes: options.states ?? [] }),
+    issues: ({ filter, orderBy }) => {
+      issuesFilters.push(filter);
+      issuesOrderBys.push(orderBy);
+      return Promise.resolve({ nodes: options.issueNodes ?? [] });
+    },
+  };
+
+  return { client, issuesFilters, issuesOrderBys };
+}
+
+describe("linear.listStandaloneIssues", () => {
+  test("queries for ready-for-agent issues with no parent and no `prd` label, in non-terminal states", async () => {
+    const stub = buildListStandaloneStub();
+
+    await listStandaloneIssues(ctx, stub.client);
+
+    const filter = stub.issuesFilters[0];
+    expect(filter).toBeDefined();
+    if (!filter) throw new Error("expected one issues call");
+
+    expect(filter.team?.id.eq).toBe("team-ENG");
+
+    // Standalone Issues have no Linear parent.
+    expect(filter.parent?.null).toBe(true);
+
+    // Non-terminal state.type filter applied (matches listPRDs).
+    const stateTypes = filter.state?.type.in;
+    expect(stateTypes).toBeDefined();
+    if (!stateTypes) throw new Error("expected state.type.in");
+    expect([...stateTypes].sort()).toEqual([
+      "backlog",
+      "started",
+      "triage",
+      "unstarted",
+    ]);
+
+    // Two label clauses: requires ready-for-agent (some), forbids prd
+    // (every).
+    expect(filter.and).toBeDefined();
+    const someClauses = (filter.and ?? [])
+      .map((c) =>
+        c.labels && "some" in c.labels ? c.labels.some.name.eq : undefined
+      )
+      .filter((n): n is string => typeof n === "string");
+    const everyClauses = (filter.and ?? [])
+      .map((c) =>
+        c.labels && "every" in c.labels ? c.labels.every.name.neq : undefined
+      )
+      .filter((n): n is string => typeof n === "string");
+    expect(someClauses).toEqual(["ready-for-agent"]);
+    expect(everyClauses).toEqual(["prd"]);
+
+    // Ordered by updatedAt desc.
+    expect(stub.issuesOrderBys[0]).toBe(PaginationOrderBy.UpdatedAt);
+  });
+
+  test("returns each issue with identifier, title, state, branchName, url", async () => {
+    const stub = buildListStandaloneStub({
+      issueNodes: [
+        {
+          id: "issue-1",
+          identifier: "ENG-7",
+          title: "Fix flaky export",
+          stateId: "state-backlog",
+          branchName: "user/eng-7-fix-flaky-export",
+          url: "https://linear.app/eng/issue/ENG-7",
+          updatedAt: new Date("2026-04-10T00:00:00Z"),
+        },
+      ],
+      states: [
+        { id: "state-backlog", name: "Backlog", type: "backlog", position: 0 },
+      ],
+    });
+
+    const issues = await listStandaloneIssues(ctx, stub.client);
+
+    expect(issues).toHaveLength(1);
+    const a = issues[0];
+    if (!a) throw new Error("unreachable");
+    expect(a.id).toBe("issue-1");
+    expect(a.identifier).toBe("ENG-7");
+    expect(a.title).toBe("Fix flaky export");
+    expect(a.state).toBe("Backlog");
+    expect(a.branchName).toBe("user/eng-7-fix-flaky-export");
+    expect(a.url).toBe("https://linear.app/eng/issue/ENG-7");
+  });
+
+  test("returns an empty list when no issues match", async () => {
+    const stub = buildListStandaloneStub({ issueNodes: [] });
+    const issues = await listStandaloneIssues(ctx, stub.client);
+    expect(issues).toEqual([]);
+  });
+
+  test("falls back to empty state name when stateId does not resolve", async () => {
+    const stub = buildListStandaloneStub({
+      issueNodes: [
+        {
+          id: "issue-1",
+          identifier: "ENG-7",
+          title: "x",
+          stateId: "missing-state",
+          branchName: "b",
+          url: "u",
+          updatedAt: new Date(0),
+        },
+      ],
+      states: [],
+    });
+    const issues = await listStandaloneIssues(ctx, stub.client);
+    expect(issues[0]?.state).toBe("");
+  });
+
+  test("throws when the configured team key does not exist", async () => {
+    const stub = buildListStandaloneStub({ knownTeamKeys: ["OTHER"] });
+    let caught: unknown = null;
+    try {
+      await listStandaloneIssues(ctx, stub.client);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/team with key "ENG" not found/);
   });
 });
 

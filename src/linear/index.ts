@@ -1,8 +1,12 @@
 // Linear SDK facade for the Linear-native flow. Operations:
 //   - listPRDs(ctx): list every issue on the configured team that carries
-//     both `prd` and `ready-for-agent` labels and is in a non-terminal
-//     workflow state. Each entry carries the count of its direct sub-issues
-//     split by `ready-for-agent` / `ready-for-human` label.
+//     the `prd` label and has at least one direct sub-issue carrying
+//     `ready-for-agent`, in a non-terminal workflow state. Each entry
+//     carries the count of its direct sub-issues split by
+//     `ready-for-agent` / `ready-for-human` label.
+//   - listStandaloneIssues(ctx): list every issue on the configured team
+//     that carries `ready-for-agent`, has no Linear parent, and does not
+//     carry the `prd` label, in a non-terminal workflow state.
 //   - fetchSubIssues(ctx, prdId): direct Linear children of a given PRD, with
 //     identifier, title, workflow state, label set, and blockedBy relations.
 //   - fetchIssueContent(ctx, issueId): the issue's description (markdown
@@ -72,6 +76,18 @@ export interface PRD {
   readyForHumanCount: number;
 }
 
+export interface StandaloneIssue {
+  /** Linear's internal UUID. */
+  id: string;
+  identifier: string;
+  title: string;
+  /** Workflow-state name (e.g. "In Progress"). */
+  state: string;
+  branchName: string;
+  url: string;
+  updatedAt: Date;
+}
+
 export interface LinearContext {
   apiKey: string;
   teamKey: string;
@@ -125,6 +141,23 @@ export interface ListPRDsIssueFilter {
   state?: { type: { in: string[] } };
 }
 
+/**
+ * Filter shape consumed by `listStandaloneIssues` via the SDK's `issues`
+ * method. Mirrors the SDK's `IssueCollectionFilter` shape — `parent.null`
+ * tests for absence of a Linear parent, and `labels.{some,every}` are used
+ * to require the `ready-for-agent` label and forbid the `prd` label
+ * respectively.
+ */
+export interface ListStandaloneIssuesFilter {
+  team?: { id: { eq: string } };
+  parent?: { null: boolean };
+  state?: { type: { in: string[] } };
+  labels?:
+    | { some: { name: { eq: string } } }
+    | { every: { name: { neq: string } } };
+  and?: ListStandaloneIssuesFilter[];
+}
+
 interface ListPRDsIssueNode {
   id: string;
   identifier: string;
@@ -157,10 +190,14 @@ export interface ListPRDsClient {
 }
 
 /**
- * List every PRD (issue tagged with both `prd` and `ready-for-agent` on the
- * configured team, in a non-terminal workflow state) ordered by `updatedAt`
- * desc. Each PRD carries the count of its direct sub-issues split by
- * `ready-for-agent` / `ready-for-human` label.
+ * List every PRD (issue tagged with `prd` on the configured team, in a
+ * non-terminal workflow state, with at least one direct sub-issue carrying
+ * `ready-for-agent`) ordered by `updatedAt` desc. Each PRD carries the count
+ * of its direct sub-issues split by `ready-for-agent` / `ready-for-human`
+ * label.
+ *
+ * Standalone PRDs — `prd`-labeled issues with zero `ready-for-agent`
+ * direct children — are filtered out so they don't clutter the picker.
  *
  * `_client` is a test seam — production callers omit it and the real
  * `LinearClient` is constructed from `ctx.apiKey`.
@@ -176,10 +213,7 @@ export async function listPRDs(
     c.issues({
       filter: {
         team: { id: { eq: teamId } },
-        and: [
-          { labels: { name: { eq: PRD_LABEL } } },
-          { labels: { name: { eq: READY_FOR_AGENT_LABEL } } },
-        ],
+        and: [{ labels: { name: { eq: PRD_LABEL } } }],
         state: { type: { in: [...NON_TERMINAL_STATE_TYPES] } },
       },
       orderBy: PaginationOrderBy.UpdatedAt,
@@ -206,6 +240,7 @@ export async function listPRDs(
         },
       }),
     ]);
+    if (agentChildren.nodes.length === 0) continue;
     prds.push({
       id: issue.id,
       identifier: issue.identifier,
@@ -223,6 +258,83 @@ export async function listPRDs(
   }
 
   return prds;
+}
+
+interface ListStandaloneIssuesIssueNode {
+  id: string;
+  identifier: string;
+  title: string;
+  stateId: string | undefined;
+  branchName: string;
+  url: string;
+  updatedAt: Date;
+}
+
+/**
+ * Minimal subset of `LinearClient` consumed by `listStandaloneIssues`.
+ * Surfaced as a named seam so tests can drive the function without mocking
+ * the entire SDK.
+ */
+export interface ListStandaloneIssuesClient {
+  teams(args: { filter: { key: { eq: string } } }): Promise<{
+    nodes: { id: string }[];
+  }>;
+  workflowStates(args: { filter: { team: { id: { eq: string } } } }): Promise<{
+    nodes: { id: string; name: string; type: string; position: number }[];
+  }>;
+  issues(args: {
+    filter: ListStandaloneIssuesFilter;
+    orderBy?: PaginationOrderBy;
+  }): Promise<{ nodes: ListStandaloneIssuesIssueNode[] }>;
+}
+
+/**
+ * List every Standalone Issue (issue tagged with `ready-for-agent` on the
+ * configured team, with no Linear parent, not carrying the `prd` label, in
+ * a non-terminal workflow state) ordered by `updatedAt` desc.
+ *
+ * `_client` is a test seam — production callers omit it and the real
+ * `LinearClient` is constructed from `ctx.apiKey`.
+ */
+export async function listStandaloneIssues(
+  ctx: LinearContext,
+  _client?: ListStandaloneIssuesClient
+): Promise<StandaloneIssue[]> {
+  const c: ListStandaloneIssuesClient =
+    _client ?? (client(ctx.apiKey));
+  const teamId = await findTeamId(c, ctx.teamKey);
+
+  const [conn, statesConn] = await Promise.all([
+    c.issues({
+      filter: {
+        team: { id: { eq: teamId } },
+        parent: { null: true },
+        state: { type: { in: [...NON_TERMINAL_STATE_TYPES] } },
+        and: [
+          { labels: { some: { name: { eq: READY_FOR_AGENT_LABEL } } } },
+          { labels: { every: { name: { neq: PRD_LABEL } } } },
+        ],
+      },
+      orderBy: PaginationOrderBy.UpdatedAt,
+    }),
+    c.workflowStates({ filter: { team: { id: { eq: teamId } } } }),
+  ]);
+
+  const stateNameById = new Map<string, string>();
+  for (const s of statesConn.nodes) stateNameById.set(s.id, s.name);
+
+  return conn.nodes.map((issue) => ({
+    id: issue.id,
+    identifier: issue.identifier,
+    title: issue.title,
+    state:
+      typeof issue.stateId === "string"
+        ? (stateNameById.get(issue.stateId) ?? "")
+        : "",
+    branchName: issue.branchName,
+    url: issue.url,
+    updatedAt: issue.updatedAt,
+  }));
 }
 
 async function findTeamId(

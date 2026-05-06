@@ -12,12 +12,18 @@ import {
 } from "./run.ts";
 import type { BuildOptions } from "./build.ts";
 import type { GhIdentity } from "../gh-identity/index.ts";
-import type { LinearContext, PRD, SubIssue } from "../linear/index.ts";
+import type {
+  LinearContext,
+  PRD,
+  StandaloneIssue,
+  SubIssue,
+} from "../linear/index.ts";
 import type {
   PrSubmissionResult,
   ShellResult,
   ShellRunner,
 } from "../pr-submission/index.ts";
+import type { RootRef } from "../selector/index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
 
 interface CallLog {
@@ -64,19 +70,32 @@ function makeListPRDs(stub: ListPRDsStub, log: CallLog) {
   };
 }
 
-interface PickPRDStub {
-  /** Index into the prds list to pick. */
-  pickIndex: number;
+interface PickRootStub {
+  /** Index into the prds list to pick. Mutually exclusive with
+   * `standalonePickIndex`. */
+  pickIndex?: number;
+  /** Index into the standaloneIssues list to pick. */
+  standalonePickIndex?: number;
   calls: number;
 }
 
-function makePickPRD(stub: PickPRDStub, log: CallLog) {
-  return (prds: readonly PRD[]): Promise<PRD> => {
+function makePickRoot(stub: PickRootStub, log: CallLog) {
+  return (input: {
+    prds: readonly PRD[];
+    standaloneIssues: readonly StandaloneIssue[];
+  }): Promise<RootRef> => {
     stub.calls += 1;
-    log.events.push("pickPRD");
-    const picked = prds[stub.pickIndex];
-    if (!picked) throw new Error("pickPRD stub: index out of range");
-    return Promise.resolve(picked);
+    log.events.push("pickRoot");
+    if (stub.standalonePickIndex !== undefined) {
+      const issue = input.standaloneIssues[stub.standalonePickIndex];
+      if (!issue)
+        throw new Error("pickRoot stub: standalone index out of range");
+      return Promise.resolve({ kind: "standalone", issue });
+    }
+    const idx = stub.pickIndex ?? 0;
+    const prd = input.prds[idx];
+    if (!prd) throw new Error("pickRoot stub: PRD index out of range");
+    return Promise.resolve({ kind: "prd", prd });
   };
 }
 
@@ -91,6 +110,29 @@ function makePRD(overrides: Partial<PRD> = {}): PRD {
     updatedAt: new Date("2026-04-01T00:00:00Z"),
     readyForAgentCount: 2,
     readyForHumanCount: 0,
+    ...overrides,
+  };
+}
+
+function prdRoot(prd: PRD): RootRef {
+  return { kind: "prd", prd };
+}
+
+function standaloneRoot(issue: StandaloneIssue): RootRef {
+  return { kind: "standalone", issue };
+}
+
+function makeStandaloneIssue(
+  overrides: Partial<StandaloneIssue> = {}
+): StandaloneIssue {
+  return {
+    id: "uuid-iss-7",
+    identifier: "ENG-7",
+    title: "Fix flaky export",
+    state: "Backlog",
+    branchName: "user/eng-7-fix-flaky-export",
+    url: "https://linear.app/eng/issue/ENG-7",
+    updatedAt: new Date("2026-04-10T00:00:00Z"),
     ...overrides,
   };
 }
@@ -189,6 +231,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -214,6 +257,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -237,6 +281,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -245,11 +290,11 @@ describe("tide run — early gates and Linear PRD selector", () => {
     expect(listStub.calls).toHaveLength(0);
   });
 
-  test("empty PRD list exits cleanly without invoking the selector", async () => {
+  test("empty PRD and Standalone Issue lists exit cleanly without invoking the selector", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [] };
-    const pickStub: PickPRDStub = { pickIndex: 0, calls: 0 };
+    const pickStub: PickRootStub = { pickIndex: 0, calls: 0 };
 
     const code = await tideRun({
       repoRoot,
@@ -259,7 +304,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
-      pickPRD: makePickPRD(pickStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
+      pickRoot: makePickRoot(pickStub, log),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -267,7 +313,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     expect(pickStub.calls).toBe(0);
   });
 
-  test("non-empty PRD list invokes pickPRD and dispatches the picked PRD to runQueueAfterPick", async () => {
+  test("non-empty PRD list invokes pickRoot and dispatches the picked PRD to runQueueAfterPick", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = {
@@ -277,8 +323,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       ],
       calls: [],
     };
-    const pickStub: PickPRDStub = { pickIndex: 1, calls: 0 };
-    const queueCalls: PRD[] = [];
+    const pickStub: PickRootStub = { pickIndex: 1, calls: 0 };
+    const queueCalls: RootRef[] = [];
 
     const code = await tideRun({
       repoRoot,
@@ -288,7 +334,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
-      pickPRD: makePickPRD(pickStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
+      pickRoot: makePickRoot(pickStub, log),
       runQueueAfterPick: (opts) => {
         log.events.push("runQueueAfterPick");
         queueCalls.push(opts.picked);
@@ -299,14 +346,51 @@ describe("tide run — early gates and Linear PRD selector", () => {
 
     expect(code).toBe(0);
     expect(pickStub.calls).toBe(1);
-    // The post-pick orchestration is invoked exactly once with the picked PRD.
     expect(queueCalls).toHaveLength(1);
-    expect(queueCalls[0]?.identifier).toBe("ENG-8");
+    const root = queueCalls[0];
+    if (root?.kind !== "prd") throw new Error("expected PRD root");
+    expect(root.prd.identifier).toBe("ENG-8");
 
-    const pickIdx = log.events.indexOf("pickPRD");
+    const pickIdx = log.events.indexOf("pickRoot");
     const queueIdx = log.events.indexOf("runQueueAfterPick");
     expect(pickIdx).toBeGreaterThanOrEqual(0);
     expect(queueIdx).toBeGreaterThan(pickIdx);
+  });
+
+  test("non-empty Standalone Issue list invokes pickRoot and dispatches the picked Issue", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const pickStub: PickRootStub = { standalonePickIndex: 0, calls: 0 };
+    const queueCalls: RootRef[] = [];
+
+    const code = await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () =>
+        Promise.resolve([
+          makeStandaloneIssue({ id: "uuid-iss-7", identifier: "ENG-7" }),
+        ]),
+      pickRoot: makePickRoot(pickStub, log),
+      runQueueAfterPick: (opts) => {
+        queueCalls.push(opts.picked);
+        return Promise.resolve(0);
+      },
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(code).toBe(0);
+    expect(queueCalls).toHaveLength(1);
+    const root = queueCalls[0];
+    if (root?.kind !== "standalone") {
+      throw new Error("expected standalone root");
+    }
+    expect(root.issue.identifier).toBe("ENG-7");
   });
 
   test("listPRDs receives the LINEAR_API_KEY and team key from config", async () => {
@@ -322,6 +406,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -345,6 +430,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -364,6 +450,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -389,6 +476,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         return Promise.resolve("ghp_test");
       },
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -416,6 +504,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
           new Error("tide: `gh auth token` failed. Run `gh auth login`")
         ),
       listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -439,6 +528,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhIdentity: makeGhIdentity(log),
       getGhToken: makeGhToken(log),
       listPRDs,
+      listStandaloneIssues: () => Promise.resolve([]),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -511,9 +601,9 @@ describe("runPrTailStep", () => {
     ghRepo: baseGhRepo,
     branch: "feature/per-32",
     baseBranch: "master",
-    parentIdentifier: "MEC-123",
-    parentTitle: "PRD: example feature",
-    parentUrl: "https://linear.app/acme/issue/MEC-123",
+    rootIdentifier: "MEC-123",
+    rootTitle: "PRD: example feature",
+    rootUrl: "https://linear.app/acme/issue/MEC-123",
     subIssues: [{ number: 8, title: "Foundation tracer" }],
     repoRoot: "/repo",
     config: baseConfig,
@@ -902,7 +992,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
     let confirmPrCalls = 0;
 
     const code = await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       // baseBranch matches the PRD's branchName — user is already on the
       // feature branch and would otherwise stack the PR on top of itself.
@@ -961,7 +1051,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
     let fetchSubIssuesCalls = 0;
 
     await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1022,7 +1112,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     const transitionCalls: { ctx: LinearContext; issueId: string }[] = [];
 
     await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1053,8 +1143,8 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
         events.push("confirmPr");
         return Promise.resolve(true);
       },
-      transitionPrdToInProgress: (ctx, issueId) => {
-        events.push("transitionPrdToInProgress");
+      transitionRootToInProgress: (ctx, issueId) => {
+        events.push("transitionRootToInProgress");
         transitionCalls.push({ ctx, issueId });
         return Promise.resolve();
       },
@@ -1063,7 +1153,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     expect(transitionCalls).toHaveLength(1);
     expect(transitionCalls[0]?.issueId).toBe("uuid-eng-7");
     // Order: confirms run first, THEN PRD transitions, THEN queue starts.
-    const tIdx = events.indexOf("transitionPrdToInProgress");
+    const tIdx = events.indexOf("transitionRootToInProgress");
     const cRunIdx = events.indexOf("confirmRun");
     const cPrIdx = events.indexOf("confirmPr");
     const qIdx = events.indexOf("runIssueQueue");
@@ -1079,7 +1169,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     let runIssueQueueCalls = 0;
 
     const code = await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1099,7 +1189,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
         } satisfies PrTailStepResult),
       confirmRun: () => Promise.resolve(false),
       confirmPr: () => Promise.resolve(true),
-      transitionPrdToInProgress: () => {
+      transitionRootToInProgress: () => {
         transitionCalls += 1;
         return Promise.resolve();
       },
@@ -1115,7 +1205,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     let runIssueQueueCalls = 0;
 
     const code = await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1135,7 +1225,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
         } satisfies PrTailStepResult),
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
-      transitionPrdToInProgress: () =>
+      transitionRootToInProgress: () =>
         Promise.reject(new Error("Linear API key invalid")),
     });
 
@@ -1156,7 +1246,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     let capturedBaseBranch: string | undefined;
 
     await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "main",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1176,7 +1266,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
         } satisfies PrTailStepResult),
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
-      transitionPrdToInProgress: () => Promise.resolve(),
+      transitionRootToInProgress: () => Promise.resolve(),
     });
 
     expect(capturedBaseBranch).toBe("main");
@@ -1241,7 +1331,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
     ];
 
     await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1258,7 +1348,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
         } satisfies PrTailStepResult),
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(false),
-      transitionPrdToInProgress: () => Promise.resolve(),
+      transitionRootToInProgress: () => Promise.resolve(),
     });
 
     const out = stdoutChunks.join("");
@@ -1283,7 +1373,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
     ];
 
     await runQueueAfterPick({
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1300,7 +1390,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
         } satisfies PrTailStepResult),
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(false),
-      transitionPrdToInProgress: () => Promise.resolve(),
+      transitionRootToInProgress: () => Promise.resolve(),
     });
 
     const out = stdoutChunks.join("");
@@ -1338,7 +1428,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
     tail: (opts: RunPrTailStepOptions) => Promise<PrTailStepResult>
   ) {
     return {
-      picked,
+      picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       baseBranch: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
@@ -1350,7 +1440,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
       runPrTailStep: tail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
-      transitionPrdToInProgress: () => Promise.resolve(),
+      transitionRootToInProgress: () => Promise.resolve(),
     };
   }
 
@@ -1434,5 +1524,386 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
     expect(code).toBe(0);
     const out = stdoutChunks.join("");
     expect(out).not.toContain("will not auto-transition");
+  });
+});
+
+describe("runQueueAfterPick — Standalone Issue root", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  test("transitions the Issue itself to In Progress (not a separate PRD) before the queue runs", async () => {
+    const issue = makeStandaloneIssue({
+      id: "uuid-iss-7",
+      identifier: "ENG-7",
+    });
+    const transitionCalls: { ctx: LinearContext; issueId: string }[] = [];
+
+    await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      // No children — the no-children validator must succeed.
+      fetchSubIssues: () => Promise.resolve([]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "ok",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: (ctx, issueId) => {
+        transitionCalls.push({ ctx, issueId });
+        return Promise.resolve();
+      },
+    });
+
+    expect(transitionCalls).toHaveLength(1);
+    expect(transitionCalls[0]?.issueId).toBe("uuid-iss-7");
+  });
+
+  test("dispatches a one-element queue carrying the Standalone Issue itself", async () => {
+    const issue = makeStandaloneIssue({
+      id: "uuid-iss-7",
+      identifier: "ENG-7",
+      title: "Fix flaky export",
+    });
+    let capturedOrdered: { id: string; identifier: string; title: string }[] =
+      [];
+    let capturedRoot: { kind: string } | undefined;
+
+    await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
+      runIssueQueue: (opts) => {
+        capturedOrdered = opts.orderedIssues;
+        capturedRoot = opts.root;
+        return Promise.resolve({ completed: 1, flipped: 0 });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "ok",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(capturedOrdered).toEqual([
+      { id: "uuid-iss-7", identifier: "ENG-7", title: "Fix flaky export" },
+    ]);
+    expect(capturedRoot).toEqual({ kind: "standalone" });
+  });
+
+  test("aborts on confirm when the Standalone Issue has Linear children, before any Linear write", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let runIssueQueueCalls = 0;
+    let transitionCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve([
+          {
+            id: "uuid-child",
+            identifier: "ENG-77",
+            title: "Sub-task",
+            state: "Backlog",
+            stateType: "backlog",
+            labels: [],
+            blockedBy: [],
+          },
+        ] as SubIssue[]),
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0, flipped: 0 });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => {
+        transitionCalls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(runIssueQueueCalls).toBe(0);
+    expect(transitionCalls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("ENG-7");
+    expect(out).toContain("Standalone Issue");
+    expect(out).toContain("non-PRD with children");
+  });
+
+  test("does not surface the children-error when the user cancels at the pre-flight (standalone with children)", async () => {
+    // PER-56 acceptance: the children-check happens AFTER the user confirms
+    // the pre-flight. Cancelling the run at the confirm prompt — even when
+    // the picked Standalone Issue would otherwise fail validation — must
+    // exit cleanly with no structural error message.
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let fetchSubIssuesCalls = 0;
+    let runIssueQueueCalls = 0;
+    let transitionCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchSubIssuesCalls += 1;
+        return Promise.resolve([
+          {
+            id: "uuid-child",
+            identifier: "ENG-77",
+            title: "Sub-task",
+            state: "Backlog",
+            stateType: "backlog",
+            labels: [],
+            blockedBy: [],
+          },
+        ] as SubIssue[]);
+      },
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0, flipped: 0 });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(false),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => {
+        transitionCalls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(fetchSubIssuesCalls).toBe(0);
+    expect(runIssueQueueCalls).toBe(0);
+    expect(transitionCalls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("non-PRD with children");
+  });
+
+  test("logs the BLOCKED warning when the standalone iteration ends on a flip (no completion)", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "Done. PR step skipped (you opted out at pre-flight).",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Issue ENG-7 is flipped to `ready-for-human`");
+    // No-merge warning for "Issue" rather than "PRD".
+    expect(out).toContain("Issue ENG-7 will not auto-transition");
+    // BLOCKED hand-off warning fires BEFORE the no-merge warning so it's
+    // the first thing the user reads after the queue ends.
+    const flippedIdx = out.indexOf("is flipped to `ready-for-human`");
+    const noMergeIdx = out.indexOf("will not auto-transition");
+    expect(flippedIdx).toBeGreaterThanOrEqual(0);
+    expect(noMergeIdx).toBeGreaterThan(flippedIdx);
+  });
+
+  test("does not log the BLOCKED warning when the standalone iteration completes (DONE)", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "Done. PR opened: https://example/pr/1",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("is flipped to `ready-for-human`");
+  });
+
+  test("PRD-rooted run with a flipped sub-issue does not log the Standalone BLOCKED warning", async () => {
+    const picked = makePRD({ identifier: "ENG-1", title: "Example PRD" });
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve([
+          makeSubIssue({
+            id: "uuid-sub-1",
+            identifier: "ENG-2",
+            title: "Sub-task",
+          }),
+        ]),
+      // The PRD-rooted queue ran one sub-issue and flipped it to
+      // `ready-for-human`. The Standalone-specific warning must not fire —
+      // the per-sub-issue warning (logged inside the runner, not here) is
+      // the only BLOCKED hand-off the user should see.
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "Done. PR step skipped (you opted out at pre-flight).",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("is flipped to `ready-for-human`");
+    // The PRD's existing no-merge warning is still expected.
+    expect(out).toContain("PRD ENG-1 will not auto-transition");
+  });
+
+  test("pre-flight summary text branches per root kind: 'Standalone Issue: 1 iteration'", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+
+    await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "ok",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Standalone Issue: 1 iteration");
+    // PRD-rooted summary text must not appear.
+    expect(out).not.toContain("PRD-rooted:");
+  });
+
+  test("PR-tail receives an empty subIssues list (the body's `Sub-issues addressed` block is omitted by buildPrPromptArgs)", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let capturedSubIssues: { number: number; title: string }[] | undefined;
+
+    await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: (opts) => {
+        capturedSubIssues = opts.subIssues;
+        return Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "ok",
+          exitCode: 0,
+        } satisfies PrTailStepResult);
+      },
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(capturedSubIssues).toEqual([]);
   });
 });

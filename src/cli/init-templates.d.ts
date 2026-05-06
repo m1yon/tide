@@ -10,6 +10,10 @@ declare module "*/init-templates/prompt.md" {
   const content: string;
   export default content;
 }
+declare module "*/init-templates/prompt-standalone.md" {
+  const content: string;
+  export default content;
+}
 declare module "*/init-templates/.env.example" {
   const content: string;
   export default content;

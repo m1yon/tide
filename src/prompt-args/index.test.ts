@@ -88,6 +88,29 @@ describe("buildPromptArgs", () => {
     expect(content).not.toContain("### Comments");
   });
 
+  it("omits PRD_CONTENT and PARENT_ID when parent is undefined (Standalone Issue root)", () => {
+    const issue: IssueContent = {
+      identifier: "ENG-300",
+      title: "Standalone issue",
+      body: "Direct body.",
+      comments: ["Note from triager"],
+    };
+    const args = buildPromptArgs({ issue });
+
+    expect(Object.keys(args).sort()).toEqual([
+      "ISSUE_CONTENT",
+      "ISSUE_ID",
+      "ISSUE_TITLE",
+    ]);
+    expect(args.ISSUE_ID).toBe("ENG-300");
+    expect(args.ISSUE_TITLE).toBe("Standalone issue");
+    const content = args.ISSUE_CONTENT as string;
+    expect(content).toContain("Direct body.");
+    expect(content).toContain("Note from triager");
+    expect(args.PRD_CONTENT).toBeUndefined();
+    expect(args.PARENT_ID).toBeUndefined();
+  });
+
   it("passes markdown special characters through verbatim (no escaping)", () => {
     const issue: IssueContent = {
       identifier: "ENG-202",

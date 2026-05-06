@@ -35,7 +35,7 @@ describe("tide init", () => {
     rmSync(workDir, { recursive: true, force: true });
   });
 
-  test("creates .tide/ with all five files at the discovered repo root", () => {
+  test("creates .tide/ with all six files at the discovered repo root", () => {
     const code = init({
       repoRoot,
       stdout: captureStdout,
@@ -47,8 +47,26 @@ describe("tide init", () => {
     expect(existsSync(join(tideDir, "config.ts"))).toBe(true);
     expect(existsSync(join(tideDir, "Dockerfile"))).toBe(true);
     expect(existsSync(join(tideDir, "prompt.md"))).toBe(true);
+    expect(existsSync(join(tideDir, "prompt-standalone.md"))).toBe(true);
     expect(existsSync(join(tideDir, ".env.example"))).toBe(true);
     expect(existsSync(join(tideDir, ".gitignore"))).toBe(true);
+  });
+
+  test("prompt-standalone.md template substitutes ISSUE_* without referencing a parent PRD", () => {
+    init({ repoRoot, stdout: captureStdout, stderr: captureStderr });
+    const prompt = readFileSync(
+      join(repoRoot, ".tide", "prompt-standalone.md"),
+      "utf8"
+    );
+    expect(prompt).toContain("{{ISSUE_ID}}");
+    expect(prompt).toContain("{{ISSUE_TITLE}}");
+    expect(prompt).toContain("{{ISSUE_CONTENT}}");
+    expect(prompt).toContain("{{SOURCE_BRANCH}}");
+    expect(prompt).toContain("{{TARGET_BRANCH}}");
+    // No parent-PRD references — Standalone Issues run without one.
+    expect(prompt).not.toContain("{{PRD_CONTENT}}");
+    expect(prompt).not.toContain("{{PARENT_ID}}");
+    expect(prompt).not.toContain("Parent PRD");
   });
 
   test("config.ts template references linear.team as the required field", () => {

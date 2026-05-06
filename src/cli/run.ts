@@ -3,17 +3,22 @@
 // Steps:
 //   1. discover repo root → capture base branch (fail fast on detached HEAD)
 //      → load config + env → resolve gh identity + token → build sandbox image
-//   2. fetch the team's PRDs from Linear (filter: prd + ready-for-agent
-//      labels, non-terminal state.type) and clack-select a PRD
-//   3. fetch the picked PRD's direct sub-issues from Linear, build the
-//      ordered queue (filter to `ready-for-agent`, topo-sort by `blockedBy`,
-//      or fall back to a one-iteration standalone path)
-//   4. preflight summary + Y/n confirms, then run the queue
+//   2. fetch the team's PRDs and Standalone Issues from Linear in parallel
+//      (PRDs: `prd` label + at least one `ready-for-agent` direct child;
+//      Standalone Issues: `ready-for-agent` label, no parent, no `prd`),
+//      then clack-select a single root
+//   3. dispatch on root kind:
+//        - PRD root: fetch the picked PRD's direct sub-issues, build the
+//          topo-ordered queue (filter to `ready-for-agent`)
+//        - Standalone Issue root: validate no Linear children exist, then
+//          build a one-element queue from the issue itself
+//   4. preflight summary + Y/n confirms, transition the root to *In
+//      Progress*, then run the queue
 //   5. push the feature branch and open a PR (or skip cleanly)
 //
-// No Linear writes happen from the host yet — sub-issues stay in their
-// original workflow state throughout. State transitions and the summarizer
-// are introduced in later slices.
+// All Linear writes happen from the host (ADR-0005). The branch name is
+// the sole PR↔root link — Linear's GitHub integration auto-transitions
+// the root on merge (ADR-0006).
 
 import { existsSync, lstatSync, mkdirSync, symlinkSync } from "node:fs";
 import path from "node:path";
@@ -43,9 +48,11 @@ import type { GhRepo } from "../github/index.ts";
 import {
   fetchSubIssues as defaultFetchSubIssues,
   listPRDs as defaultListPRDs,
+  listStandaloneIssues as defaultListStandaloneIssues,
   transitionToInProgress as defaultTransitionToInProgress,
   type LinearContext,
   type PRD,
+  type StandaloneIssue,
   type SubIssue,
 } from "../linear/index.ts";
 import {
@@ -64,7 +71,10 @@ import {
   type RunIssueQueueOptions,
   type RunIssueQueueResult,
 } from "../runner/index.ts";
-import { pickPRD as defaultPickPRD } from "../selector/index.ts";
+import {
+  pickRoot as defaultPickRoot,
+  type RootRef,
+} from "../selector/index.ts";
 
 const READY_FOR_AGENT = "ready-for-agent";
 const READY_FOR_HUMAN = "ready-for-human";
@@ -83,8 +93,13 @@ export interface RunOptions {
   getGhToken?: (options: GetGhTokenOptions) => Promise<string>;
   /** Linear PRD list fetcher. Tests stub this to avoid hitting Linear. */
   listPRDs?: (ctx: LinearContext) => Promise<PRD[]>;
-  /** PRD selector prompt. Tests stub this to bypass the clack UI. */
-  pickPRD?: (prds: readonly PRD[]) => Promise<PRD>;
+  /** Linear Standalone Issue list fetcher. Tests stub this. */
+  listStandaloneIssues?: (ctx: LinearContext) => Promise<StandaloneIssue[]>;
+  /** Root selector prompt. Tests stub this to bypass the clack UI. */
+  pickRoot?: (input: {
+    prds: readonly PRD[];
+    standaloneIssues: readonly StandaloneIssue[];
+  }) => Promise<RootRef>;
   /**
    * Test seam: post-pick orchestration (queue build + confirms + queue run +
    * PR tail). Defaults to the in-module `runQueueAfterPick`.
@@ -99,15 +114,18 @@ export interface RunOptions {
 }
 
 export interface RunQueueAfterPickOptions {
-  picked: PRD;
+  /** Tagged-union root reference returned by the picker. */
+  picked: RootRef;
   ghRepo: GhRepo;
   baseBranch: string;
   linearCtx: LinearContext;
   repoRoot: string;
   config: TideConfig;
   sandboxEnv: Record<string, string>;
-  /** Test seam — defaults to `linear.fetchSubIssues`. */
-  fetchSubIssues?: (ctx: LinearContext, prdId: string) => Promise<SubIssue[]>;
+  /** Test seam — defaults to `linear.fetchSubIssues`. Used both to build
+   * the queue for PRD roots and to validate the "no children" rule for
+   * Standalone Issue roots. */
+  fetchSubIssues?: (ctx: LinearContext, issueId: string) => Promise<SubIssue[]>;
   /** Test seam — defaults to the runner module's `runIssueQueue`. */
   runIssueQueue?: (opts: RunIssueQueueOptions) => Promise<RunIssueQueueResult>;
   /** Test seam — defaults to the in-module `runPrTailStep`. */
@@ -117,9 +135,10 @@ export interface RunQueueAfterPickOptions {
   /** Test seam — clack `confirm` for "Create a PR at the end?". */
   confirmPr?: () => Promise<boolean>;
   /** Test seam — defaults to `linear.transitionToInProgress`. Used to
-   * transition the PRD itself to *In Progress* once both pre-flight confirms
-   * have been answered. */
-  transitionPrdToInProgress?: (
+   * transition the picked root to *In Progress* once both pre-flight
+   * confirms have been answered. For PRD roots this is the PRD itself; for
+   * Standalone Issue roots this is the issue itself. */
+  transitionRootToInProgress?: (
     ctx: LinearContext,
     issueId: string
   ) => Promise<void>;
@@ -130,12 +149,14 @@ export interface RunPrTailStepOptions {
   ghRepo: GhRepo;
   branch: string;
   baseBranch: string;
-  /** Linear PRD identifier (e.g. "MEC-123"). */
-  parentIdentifier: string;
-  parentTitle: string;
-  /** Linear PRD URL. */
-  parentUrl: string;
-  /** Topo-ordered sub-issues addressed by this PR. */
+  /** Linear root identifier (e.g. "MEC-123"). PRD identifier for PRD
+   * roots; Standalone Issue identifier for Standalone roots. */
+  rootIdentifier: string;
+  rootTitle: string;
+  /** Linear root URL. */
+  rootUrl: string;
+  /** Topo-ordered sub-issues addressed by this PR. Empty for Standalone
+   * Issue roots. */
   subIssues: SubIssueRef[];
   repoRoot: string;
   config: TideConfig;
@@ -323,9 +344,9 @@ export async function runPrTailStep(
       ghRepo: opts.ghRepo,
       branch: opts.branch,
       baseBranch: opts.baseBranch,
-      parentIdentifier: opts.parentIdentifier,
-      parentTitle: opts.parentTitle,
-      parentUrl: opts.parentUrl,
+      rootIdentifier: opts.rootIdentifier,
+      rootTitle: opts.rootTitle,
+      rootUrl: opts.rootUrl,
       subIssues: opts.subIssues,
       repoRoot: opts.repoRoot,
       config: opts.config,
@@ -366,11 +387,40 @@ async function defaultConfirmPr(): Promise<boolean> {
   return !isCancel(answer) && answer;
 }
 
+interface RootMeta {
+  /** Linear UUID of the picked root. */
+  id: string;
+  identifier: string;
+  title: string;
+  branchName: string;
+  url: string;
+}
+
+function rootMetaFromPicked(picked: RootRef): RootMeta {
+  if (picked.kind === "prd") {
+    return {
+      id: picked.prd.id,
+      identifier: picked.prd.identifier,
+      title: picked.prd.title,
+      branchName: picked.prd.branchName,
+      url: picked.prd.url,
+    };
+  }
+  return {
+    id: picked.issue.id,
+    identifier: picked.issue.identifier,
+    title: picked.issue.title,
+    branchName: picked.issue.branchName,
+    url: picked.issue.url,
+  };
+}
+
 /**
- * Post-pick orchestration: fetch sub-issues, build the queue, run pre-flight
- * confirms, run the queue, and dispatch to `runPrTailStep` for the PR step.
- * Surfaced as a named export so tests can stub it for early-gate coverage
- * and exercise it directly with stubs for orchestration coverage.
+ * Post-pick orchestration: fetch sub-issues (PRD root) or validate
+ * structure (Standalone Issue root), build the queue, run pre-flight
+ * confirms, run the queue, and dispatch to `runPrTailStep` for the PR
+ * step. Surfaced as a named export so tests can stub it for early-gate
+ * coverage and exercise it directly with stubs for orchestration coverage.
  */
 export async function runQueueAfterPick(
   opts: RunQueueAfterPickOptions
@@ -380,15 +430,18 @@ export async function runQueueAfterPick(
   const runPrTailStepFn = opts.runPrTailStep ?? runPrTailStep;
   const confirmRunFn = opts.confirmRun ?? defaultConfirmRun;
   const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
-  const transitionPrdToInProgressFn =
-    opts.transitionPrdToInProgress ?? defaultTransitionToInProgress;
+  const transitionRootToInProgressFn =
+    opts.transitionRootToInProgress ?? defaultTransitionToInProgress;
 
-  // Pre-flight: refuse to run from the picked PRD's feature branch. The base
-  // branch we resolved at startup is whatever the user invoked `tide run`
-  // from; if it matches the PRD's auto-generated `branchName`, the user has
-  // already checked out the feature branch and would otherwise stack the new
-  // PR on top of itself. Fail before any Linear write or sandbox launch.
-  if (opts.picked.branchName === opts.baseBranch) {
+  const root = rootMetaFromPicked(opts.picked);
+
+  // Pre-flight: refuse to run from the picked root's feature branch. The
+  // base branch we resolved at startup is whatever the user invoked `tide
+  // run` from; if it matches the root's auto-generated `branchName`, the
+  // user has already checked out the feature branch and would otherwise
+  // stack the new PR on top of itself. Fail before any Linear write or
+  // sandbox launch.
+  if (root.branchName === opts.baseBranch) {
     log.error(
       `tide run must be invoked from the base branch, not the feature branch (${opts.baseBranch}). Switch back to your base branch and re-run.`
     );
@@ -396,87 +449,125 @@ export async function runQueueAfterPick(
     return 1;
   }
 
-  const subSpin = spinner();
-  subSpin.start("Fetching sub-issues from Linear");
-  let subIssues: SubIssue[];
-  try {
-    subIssues = await fetchSubIssuesFn(opts.linearCtx, opts.picked.id);
-  } catch (err) {
-    subSpin.stop("Linear sub-issue fetch failed");
-    const msg = err instanceof Error ? err.message : String(err);
-    log.error(msg);
-    outro("Aborted.");
-    return 1;
-  }
-  subSpin.stop(`Fetched ${String(subIssues.length)} sub-issue(s)`);
+  let orderedIssues: OrderedIssue[];
 
-  const queue = buildOrderedQueue(subIssues);
-  if (queue.kind === "error") {
-    log.error(queue.message);
-    outro("Aborted.");
-    return 1;
-  }
+  if (opts.picked.kind === "prd") {
+    const subSpin = spinner();
+    subSpin.start("Fetching sub-issues from Linear");
+    let subIssues: SubIssue[];
+    try {
+      subIssues = await fetchSubIssuesFn(opts.linearCtx, root.id);
+    } catch (err) {
+      subSpin.stop("Linear sub-issue fetch failed");
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(msg);
+      outro("Aborted.");
+      return 1;
+    }
+    subSpin.stop(`Fetched ${String(subIssues.length)} sub-issue(s)`);
 
-  const branch = opts.picked.branchName;
-  const orderedIssues: OrderedIssue[] =
-    queue.kind === "standalone"
-      ? [
-          {
-            id: opts.picked.id,
-            identifier: opts.picked.identifier,
-            title: opts.picked.title,
-          },
-        ]
-      : queue.ordered;
+    const queue = buildOrderedQueue(subIssues);
+    if (queue.kind === "error") {
+      log.error(queue.message);
+      outro("Aborted.");
+      return 1;
+    }
+    orderedIssues =
+      queue.kind === "standalone"
+        ? [{ id: root.id, identifier: root.identifier, title: root.title }]
+        : queue.ordered;
 
-  log.info(`Branch: ${branch}`);
-  if (queue.kind === "standalone") {
-    log.info(
-      "Standalone PRD (no `ready-for-agent` direct children) — running the PRD itself."
-    );
+    log.info(`Branch: ${root.branchName}`);
+    if (queue.kind === "standalone") {
+      log.info(
+        "Standalone PRD (no `ready-for-agent` direct children) — running the PRD itself."
+      );
+    } else {
+      log.info(
+        `PRD-rooted: ${String(queue.ordered.length)} sub-issue(s) in topo order:`
+      );
+      for (const o of queue.ordered) {
+        log.message(`  ${o.identifier} ${o.title}`);
+      }
+    }
+
+    // Surface direct children flagged `ready-for-human` (typically the
+    // residue of a previous run's BLOCKED / agent-FAIL flip) as a one-line
+    // skip notice so the user knows what is *not* in the queue. These are
+    // already excluded from `queue.ordered` by `buildOrderedQueue`.
+    for (const s of subIssues) {
+      if (s.labels.includes(READY_FOR_HUMAN)) {
+        log.info(`Skipping ${s.identifier}: ready-for-human`);
+      }
+    }
   } else {
-    log.info("Topo-ordered queue:");
-    for (const o of queue.ordered) {
-      log.message(`  ${o.identifier} ${o.title}`);
-    }
+    // Standalone Issue root: build a one-element queue. The no-children
+    // contract is validated post-confirm (below) so that a user who cancels
+    // out of the pre-flight does not see a structural error message.
+    orderedIssues = [
+      { id: root.id, identifier: root.identifier, title: root.title },
+    ];
+    log.info(`Branch: ${root.branchName}`);
+    log.info(`Standalone Issue: 1 iteration on ${root.identifier}.`);
   }
 
-  // Surface direct children flagged `ready-for-human` (typically the
-  // residue of a previous run's BLOCKED / agent-FAIL flip) as a one-line
-  // skip notice so the user knows what is *not* in the queue. These are
-  // already excluded from `queue.ordered` by `buildOrderedQueue`.
-  for (const s of subIssues) {
-    if (s.labels.includes(READY_FOR_HUMAN)) {
-      log.info(`Skipping ${s.identifier}: ready-for-human`);
-    }
-  }
-
-  const proceed = await confirmRunFn(orderedIssues.length, branch);
+  const proceed = await confirmRunFn(orderedIssues.length, root.branchName);
   if (!proceed) {
     cancel("Cancelled before any run() invocation.");
     return 0;
   }
 
+  // Standalone Issue contract: no Linear children. Validated only after the
+  // user has confirmed the pre-flight, so a cancel at the confirm prompt
+  // does not surface this structural error. No Linear writes have happened
+  // yet, so the abort path stays clean.
+  if (opts.picked.kind === "standalone") {
+    const childSpin = spinner();
+    childSpin.start("Verifying Standalone Issue has no Linear children");
+    let children: SubIssue[];
+    try {
+      children = await fetchSubIssuesFn(opts.linearCtx, root.id);
+    } catch (err) {
+      childSpin.stop("Linear child fetch failed");
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(msg);
+      outro("Aborted.");
+      return 1;
+    }
+    childSpin.stop("Verified");
+    if (children.length > 0) {
+      log.error(
+        `${root.identifier} is a Standalone Issue but has ${String(children.length)} Linear ` +
+          "child issue(s) — non-PRD with children. Label the parent as `prd` or remove the children, then re-run."
+      );
+      outro("Aborted.");
+      return 1;
+    }
+  }
+
   const prCreationConfirmed = await confirmPrFn();
 
-  // Transition the PRD itself to *In Progress* once the user has committed
-  // to running the queue. A cancelled pre-flight (above) leaves the PRD
+  // Transition the picked root to *In Progress* once the user has committed
+  // to running the queue. A cancelled pre-flight (above) leaves it
   // untouched. A failure here is an infra failure — no Linear writes have
-  // happened on sub-issues yet, so we abort cleanly.
+  // happened on iteration units yet, so we abort cleanly.
   try {
-    await transitionPrdToInProgressFn(opts.linearCtx, opts.picked.id);
+    await transitionRootToInProgressFn(opts.linearCtx, root.id);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log.error(`Failed to transition PRD to In Progress: ${msg}`);
+    const label = opts.picked.kind === "prd" ? "PRD" : "Issue";
+    log.error(`Failed to transition ${label} to In Progress: ${msg}`);
     outro("Aborted.");
     return 1;
   }
 
   const queueResult = await runIssueQueueFn({
-    parentIdentifier: opts.picked.identifier,
-    parentId: opts.picked.id,
+    root:
+      opts.picked.kind === "prd"
+        ? { kind: "prd", id: root.id, identifier: root.identifier }
+        : { kind: "standalone" },
     orderedIssues,
-    branch,
+    branch: root.branchName,
     baseBranch: opts.baseBranch,
     linearCtx: opts.linearCtx,
     repoRoot: opts.repoRoot,
@@ -493,27 +584,30 @@ export async function runQueueAfterPick(
     log.info(
       `Completed ${String(queueResult.completed)} of ${String(orderedIssues.length)} issue(s) before abort.`
     );
-    outro("Aborted. Inspect the worktree, fix, and re-run on the same PRD.");
+    outro("Aborted. Inspect the worktree, fix, and re-run on the same root.");
     return 1;
   }
 
-  // Convert ordered queue into the PR-tail's SubIssueRef shape. The PR-tail
-  // is an in-flight legacy seam keyed on numeric issue numbers; for the
-  // Linear-native flow we surface identifier strings via the title to
-  // preserve the existing template's "Sub-issues addressed" list.
-  const subIssueRefs: SubIssueRef[] = orderedIssues.map((o, i) => ({
-    number: i + 1,
-    title: `${o.identifier} ${o.title}`,
-  }));
+  // Convert ordered queue into the PR-tail's SubIssueRef shape. For PRD
+  // roots we surface the topo-ordered sub-issues as numbered bullets so the
+  // template renders the "Sub-issues addressed" block. For Standalone Issue
+  // roots we pass an empty list — the block is omitted entirely.
+  const subIssueRefs: SubIssueRef[] =
+    opts.picked.kind === "prd"
+      ? orderedIssues.map((o, i) => ({
+          number: i + 1,
+          title: `${o.identifier} ${o.title}`,
+        }))
+      : [];
 
   const tail = await runPrTailStepFn({
     prCreationConfirmed,
     ghRepo: opts.ghRepo,
-    branch,
+    branch: root.branchName,
     baseBranch: opts.baseBranch,
-    parentIdentifier: opts.picked.identifier,
-    parentTitle: opts.picked.title,
-    parentUrl: opts.picked.url,
+    rootIdentifier: root.identifier,
+    rootTitle: root.title,
+    rootUrl: root.url,
     subIssues: subIssueRefs,
     repoRoot: opts.repoRoot,
     config: opts.config,
@@ -527,13 +621,28 @@ export async function runQueueAfterPick(
     log.success(tail.outcome.url);
   }
 
+  // Standalone-Issue end-of-run BLOCKED warning: when no commits landed on
+  // the iteration the issue is now flipped to `ready-for-human` and stays
+  // *In Progress* until the user resolves it. Fire alongside the no-merge
+  // warning below.
+  if (
+    opts.picked.kind === "standalone" &&
+    queueResult.completed === 0 &&
+    queueResult.flipped > 0
+  ) {
+    log.warn(
+      `Issue ${root.identifier} is flipped to \`ready-for-human\` and stays *In Progress* until you resolve it.`
+    );
+  }
+
   // No-merge warning: any tail outcome other than `opened` means no PR was
   // opened on this run, so Linear's GitHub integration won't auto-transition
-  // the PRD to Done on merge. Surface this as a yellow warning so the user
-  // can transition the PRD manually if they're shipping outside this run.
+  // the root to Done on merge. Surface this as a yellow warning so the user
+  // can transition manually if they're shipping outside this run.
   if (tail.outcome.kind !== "opened") {
+    const label = opts.picked.kind === "prd" ? "PRD" : "Issue";
     log.warn(
-      `PRD ${opts.picked.identifier} will not auto-transition. Transition manually in Linear if shipping outside this run.`
+      `${label} ${root.identifier} will not auto-transition. Transition manually in Linear if shipping outside this run.`
     );
   }
 
@@ -577,7 +686,9 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   const getGhIdentity = options.getGhIdentity ?? defaultGetGhIdentity;
   const getGhToken = options.getGhToken ?? defaultGetGhToken;
   const listPRDsFn = options.listPRDs ?? defaultListPRDs;
-  const pickPRDFn = options.pickPRD ?? defaultPickPRD;
+  const listStandaloneIssuesFn =
+    options.listStandaloneIssues ?? defaultListStandaloneIssues;
+  const pickRootFn = options.pickRoot ?? defaultPickRoot;
   const runQueueAfterPickFn = options.runQueueAfterPick ?? runQueueAfterPick;
 
   let repoRoot: string;
@@ -673,39 +784,52 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
 
   intro("tide run");
 
-  // Fetch the PRD list from Linear.
+  // Fetch PRDs and Standalone Issues in parallel.
   const fetchSpin = spinner();
-  fetchSpin.start("Fetching PRDs from Linear");
+  fetchSpin.start("Fetching PRDs and Standalone Issues from Linear");
+  const linearCtx: LinearContext = {
+    apiKey: linearApiKey,
+    teamKey: config.linear.team,
+  };
   let prds: PRD[];
+  let standaloneIssues: StandaloneIssue[];
   try {
-    prds = await listPRDsFn({
-      apiKey: linearApiKey,
-      teamKey: config.linear.team,
-    });
+    [prds, standaloneIssues] = await Promise.all([
+      listPRDsFn(linearCtx),
+      listStandaloneIssuesFn(linearCtx),
+    ]);
   } catch (err) {
     fetchSpin.stop("Linear fetch failed");
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
     return 1;
   }
-  fetchSpin.stop(`Fetched ${String(prds.length)} PRD(s)`);
+  fetchSpin.stop(
+    `Fetched ${String(prds.length)} PRD(s), ${String(standaloneIssues.length)} Standalone Issue(s)`
+  );
 
-  if (prds.length === 0) {
+  if (prds.length === 0 && standaloneIssues.length === 0) {
     outro(
-      "No PRDs to run. Author one in Linear with the `prd` + `ready-for-agent` labels."
+      "No roots to run. Author a PRD with `ready-for-agent` sub-issues, or a Standalone Issue with the `ready-for-agent` label, in Linear."
     );
     return 0;
   }
 
-  const picked = await pickPRDFn(prds);
+  const picked = await pickRootFn({ prds, standaloneIssues });
 
-  log.info(`Selected: ${picked.identifier} ${picked.title}`);
+  if (picked.kind === "prd") {
+    log.info(`Selected: [PRD] ${picked.prd.identifier} ${picked.prd.title}`);
+  } else {
+    log.info(
+      `Selected: [Issue] ${picked.issue.identifier} ${picked.issue.title}`
+    );
+  }
 
   return await runQueueAfterPickFn({
     picked,
     ghRepo: { owner: ghIdentity.owner, repo: ghIdentity.repo },
     baseBranch,
-    linearCtx: { apiKey: linearApiKey, teamKey: config.linear.team },
+    linearCtx,
     repoRoot,
     config,
     sandboxEnv,
