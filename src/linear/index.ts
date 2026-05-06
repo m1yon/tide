@@ -452,6 +452,170 @@ export async function setupLabels(
 }
 
 /**
+ * Canonical name of the workflow state tide provisions and uses for the
+ * post-PR-submission hand-off. Hardcoded — no per-workspace configuration.
+ */
+export const IN_REVIEW_STATE_NAME = "In Review";
+
+export interface ProvisionInReviewStateResult {
+  /** Always equal to `IN_REVIEW_STATE_NAME` ("In Review"). */
+  name: typeof IN_REVIEW_STATE_NAME;
+  /** True if this run created the state; false if it was already present. */
+  created: boolean;
+}
+
+/**
+ * Minimal subset of `LinearClient` consumed by `provisionInReviewState`.
+ * Surfaced as a named seam so tests can drive the function without mocking
+ * the entire SDK.
+ */
+export interface ProvisionInReviewStateClient {
+  teams(args: {
+    filter: { key: { eq: string } };
+  }): Promise<{ nodes: { id: string }[] }>;
+  workflowStates(args: { filter: { team: { id: { eq: string } } } }): Promise<{
+    nodes: { id: string; name: string; type: string; position: number }[];
+  }>;
+  createWorkflowState(input: {
+    teamId: string;
+    name: string;
+    type: string;
+    color: string;
+    position: number;
+  }): Promise<{ success: boolean }>;
+}
+
+/**
+ * Idempotently ensure the `"In Review"` workflow state exists on the
+ * configured Linear team with `state.type === "started"`.
+ *
+ * If a same-name state of the right type is already present this is a no-op
+ * and returns `{ created: false }`. If absent, creates it via
+ * `WorkflowStateCreate` with a `position` strictly between the
+ * lowest-`position` `started` state ("In Progress") and the lowest-`position`
+ * `completed` state ("Done"), so it reads naturally between them in Linear's
+ * UI.
+ *
+ * Throws when either flanking state is missing — rather than silently
+ * picking a bad position, we surface a clear error pointing at Linear's team
+ * settings. This keeps `tide setup` safe to re-run on a partially-configured
+ * team.
+ *
+ * `_client` is a test seam — production callers omit it and the real
+ * `LinearClient` is constructed from `ctx.apiKey`.
+ */
+export async function provisionInReviewState(
+  ctx: LinearContext,
+  _client?: ProvisionInReviewStateClient
+): Promise<ProvisionInReviewStateResult> {
+  const c: ProvisionInReviewStateClient = _client ?? client(ctx.apiKey);
+  const teamId = await findTeamId(c, ctx.teamKey);
+
+  const states = await c.workflowStates({
+    filter: { team: { id: { eq: teamId } } },
+  });
+
+  const existingId = pickWorkflowStateByName(
+    states.nodes,
+    IN_REVIEW_STATE_NAME,
+    "started"
+  );
+  if (existingId !== undefined) {
+    return { name: IN_REVIEW_STATE_NAME, created: false };
+  }
+
+  let inProgress: { position: number } | undefined;
+  let done: { position: number } | undefined;
+  for (const s of states.nodes) {
+    if (s.type === "started") {
+      if (!inProgress || s.position < inProgress.position) {
+        inProgress = { position: s.position };
+      }
+    } else if (s.type === "completed") {
+      if (!done || s.position < done.position) {
+        done = { position: s.position };
+      }
+    }
+  }
+  if (!inProgress) {
+    throw new Error(
+      `Linear team has no \`started\`-type workflow state to flank "${IN_REVIEW_STATE_NAME}". ` +
+        `Add an "In Progress" state in Linear's team settings, then re-run \`tide setup\`.`
+    );
+  }
+  if (!done) {
+    throw new Error(
+      `Linear team has no \`completed\`-type workflow state to flank "${IN_REVIEW_STATE_NAME}". ` +
+        `Add a "Done" state in Linear's team settings, then re-run \`tide setup\`.`
+    );
+  }
+
+  const newPosition = (inProgress.position + done.position) / 2;
+  const payload = await c.createWorkflowState({
+    teamId,
+    name: IN_REVIEW_STATE_NAME,
+    type: "started",
+    color: "#0CA5E9",
+    position: newPosition,
+  });
+  if (!payload.success) {
+    throw new Error(
+      `Linear createWorkflowState for "${IN_REVIEW_STATE_NAME}" returned success=false.`
+    );
+  }
+  return { name: IN_REVIEW_STATE_NAME, created: true };
+}
+
+/**
+ * Minimal subset of `LinearClient` consumed by `assertInReviewStatePresent`.
+ * Surfaced as a named seam so tests can drive the function without mocking
+ * the entire SDK.
+ */
+export interface AssertInReviewStatePresentClient {
+  teams(args: {
+    filter: { key: { eq: string } };
+  }): Promise<{ nodes: { id: string }[] }>;
+  workflowStates(args: { filter: { team: { id: { eq: string } } } }): Promise<{
+    nodes: { id: string; name: string; type: string; position: number }[];
+  }>;
+}
+
+/**
+ * Verify that the configured Linear team has an `"In Review"` workflow
+ * state with `state.type === "started"`. Throws with a `tide setup` hint
+ * when missing.
+ *
+ * Used by `tide doctor` and the `tide run` preflight to fail before any
+ * other work — without this gate, a missing state would only be discovered
+ * after a full clean run, when the post-submission hand-off attempted to
+ * transition the parent.
+ *
+ * `_client` is a test seam — production callers omit it and the real
+ * `LinearClient` is constructed from `ctx.apiKey`.
+ */
+export async function assertInReviewStatePresent(
+  ctx: LinearContext,
+  _client?: AssertInReviewStatePresentClient
+): Promise<void> {
+  const c: AssertInReviewStatePresentClient = _client ?? client(ctx.apiKey);
+  const teamId = await findTeamId(c, ctx.teamKey);
+  const states = await c.workflowStates({
+    filter: { team: { id: { eq: teamId } } },
+  });
+  const id = pickWorkflowStateByName(
+    states.nodes,
+    IN_REVIEW_STATE_NAME,
+    "started"
+  );
+  if (id === undefined) {
+    throw new Error(
+      `Linear team "${ctx.teamKey}" has no \`started\`-type workflow state named "${IN_REVIEW_STATE_NAME}". ` +
+        `Run \`tide setup\` to provision it.`
+    );
+  }
+}
+
+/**
  * Pure GraphQL transport seam used by `fetchSubIssues` / `fetchIssueContent`.
  * Production callers omit this and the implementation wraps the SDK client's
  * underlying `request` (which posts a GraphQL document and returns the
@@ -772,12 +936,12 @@ export async function transitionToInReview(
   }
   const stateId = pickWorkflowStateByName(
     data.issue.team.states.nodes,
-    "In Review",
+    IN_REVIEW_STATE_NAME,
     "started"
   );
   if (stateId === undefined) {
     throw new Error(
-      `No workflow state named "In Review" exists on the team for issue "${issueId}". ` +
+      `No workflow state named "${IN_REVIEW_STATE_NAME}" exists on the team for issue "${issueId}". ` +
         `Run \`tide setup\` to provision it.`
     );
   }

@@ -113,6 +113,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner: happyRunner(),
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(0);
@@ -122,6 +123,7 @@ describe("tide doctor", () => {
     expect(out).toContain(".tide/config.ts");
     expect(out).toContain("docker daemon");
     expect(out).toContain("Linear API");
+    expect(out).toContain('Linear "In Review" state');
     expect(out).toContain("gh repo identity");
     expect(out).toContain("tide version");
     expect(out).toContain("all checks passed");
@@ -141,10 +143,58 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner: happyRunner(),
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(0);
     expect(sinks.stdout.join("")).toContain("all checks passed");
+  });
+
+  test("missing `In Review` state yields non-zero exit with a `tide setup` hint", async () => {
+    writeValidEnv();
+    writeValidConfig();
+    const sinks = makeSinks();
+
+    const code = await doctor({
+      repoRoot,
+      stdout: sinks.pushStdout,
+      stderr: sinks.pushStderr,
+      runner: happyRunner(),
+      linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () =>
+        Promise.reject(
+          new Error(
+            'Linear team "ENG" has no `started`-type workflow state named "In Review". Run `tide setup` to provision it.'
+          )
+        ),
+    });
+
+    expect(code).toBe(1);
+    const stderr = sinks.stderr.join("");
+    expect(stderr).toContain("In Review");
+    expect(stderr).toContain("tide setup");
+    expect(sinks.stdout.join("")).toContain('Linear "In Review" state');
+  });
+
+  test("`In Review` check receives the apiKey and teamKey from env+config", async () => {
+    writeValidEnv();
+    writeValidConfig();
+    const sinks = makeSinks();
+    const calls: { apiKey: string; teamKey: string }[] = [];
+
+    await doctor({
+      repoRoot,
+      stdout: sinks.pushStdout,
+      stderr: sinks.pushStderr,
+      runner: happyRunner(),
+      linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: (ctx) => {
+        calls.push({ apiKey: ctx.apiKey, teamKey: ctx.teamKey });
+        return Promise.resolve();
+      },
+    });
+
+    expect(calls).toEqual([{ apiKey: "lk", teamKey: "ENG" }]);
   });
 
   test("gh auth failure exits non-zero with a remediation hint", async () => {
@@ -169,6 +219,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner,
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
@@ -185,6 +236,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner: happyRunner(),
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
@@ -202,6 +254,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner: happyRunner(),
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
@@ -218,6 +271,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner: happyRunner(),
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
@@ -246,6 +300,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner,
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
@@ -263,6 +318,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner: happyRunner(),
       linearViewerCheck: () => Promise.reject(new Error("invalid api key")),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
@@ -292,6 +348,7 @@ describe("tide doctor", () => {
       stderr: sinks.pushStderr,
       runner,
       linearViewerCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
@@ -312,6 +369,7 @@ describe("tide doctor", () => {
         stderr: sinks.pushStderr,
         runner: happyRunner(),
         linearViewerCheck: () => Promise.resolve(),
+        linearInReviewStateCheck: () => Promise.resolve(),
       });
     } finally {
       process.chdir(originalCwd);

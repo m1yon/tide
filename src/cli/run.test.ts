@@ -232,6 +232,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -258,6 +259,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -282,6 +284,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -306,6 +309,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       pickRoot: makePickRoot(pickStub, log),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -341,6 +345,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         queueCalls.push(opts.picked);
         return Promise.resolve(0);
       },
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -381,6 +386,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         queueCalls.push(opts.picked);
         return Promise.resolve(0);
       },
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -407,6 +413,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -431,6 +438,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -451,6 +459,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -477,6 +486,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       },
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -505,6 +515,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         ),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -529,11 +540,80 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs,
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
     expect(code).toBe(1);
     expect(stderrChunks.join("")).toContain("Linear API key invalid");
+  });
+
+  test("preflight refuses to start when `In Review` is missing — fails before build, gh, or Linear fetch", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    let ghIdentityCalls = 0;
+    let ghTokenCalls = 0;
+
+    const code = await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: () => {
+        ghIdentityCalls += 1;
+        return Promise.resolve({ owner: "m1yon", repo: "tide" });
+      },
+      getGhToken: () => {
+        ghTokenCalls += 1;
+        return Promise.resolve("ghp_test");
+      },
+      listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () =>
+        Promise.reject(
+          new Error(
+            'Linear team "ENG" has no `started`-type workflow state named "In Review". Run `tide setup` to provision it.'
+          )
+        ),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(code).toBe(1);
+    // No further work attempted — preflight short-circuits before build,
+    // gh-identity/token resolution, and the Linear PRD fetch.
+    expect(buildStub.calls).toHaveLength(0);
+    expect(ghIdentityCalls).toBe(0);
+    expect(ghTokenCalls).toBe(0);
+    expect(listStub.calls).toHaveLength(0);
+    const stderr = stderrChunks.join("");
+    expect(stderr).toContain("In Review");
+    expect(stderr).toContain("tide setup");
+  });
+
+  test("preflight receives the LINEAR_API_KEY and team key from config", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const calls: { apiKey: string; teamKey: string }[] = [];
+
+    await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: (ctx) => {
+        calls.push({ apiKey: ctx.apiKey, teamKey: ctx.teamKey });
+        return Promise.resolve();
+      },
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(calls).toEqual([{ apiKey: "lk", teamKey: "ENG" }]);
   });
 });
 
