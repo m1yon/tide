@@ -1768,6 +1768,83 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     expect(out).toContain("Issue ENG-7 is flipped to `ready-for-human`");
     // No-merge warning for "Issue" rather than "PRD".
     expect(out).toContain("Issue ENG-7 will not auto-transition");
+    // BLOCKED hand-off warning fires BEFORE the no-merge warning so it's
+    // the first thing the user reads after the queue ends.
+    const flippedIdx = out.indexOf("is flipped to `ready-for-human`");
+    const noMergeIdx = out.indexOf("will not auto-transition");
+    expect(flippedIdx).toBeGreaterThanOrEqual(0);
+    expect(noMergeIdx).toBeGreaterThan(flippedIdx);
+  });
+
+  test("does not log the BLOCKED warning when the standalone iteration completes (DONE)", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "Done. PR opened: https://example/pr/1",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("is flipped to `ready-for-human`");
+  });
+
+  test("PRD-rooted run with a flipped sub-issue does not log the Standalone BLOCKED warning", async () => {
+    const picked = makePRD({ identifier: "ENG-1", title: "Example PRD" });
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve([
+          makeSubIssue({
+            id: "uuid-sub-1",
+            identifier: "ENG-2",
+            title: "Sub-task",
+          }),
+        ]),
+      // The PRD-rooted queue ran one sub-issue and flipped it to
+      // `ready-for-human`. The Standalone-specific warning must not fire —
+      // the per-sub-issue warning (logged inside the runner, not here) is
+      // the only BLOCKED hand-off the user should see.
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "Done. PR step skipped (you opted out at pre-flight).",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("is flipped to `ready-for-human`");
+    // The PRD's existing no-merge warning is still expected.
+    expect(out).toContain("PRD ENG-1 will not auto-transition");
   });
 
   test("pre-flight summary text branches per root kind: 'Standalone Issue: 1 iteration'", async () => {
