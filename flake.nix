@@ -75,7 +75,7 @@
           # `bun.lock` changes — `nix build` will print the new hash on
           # mismatch. To force a re-derivation, swap this for
           # `pkgs.lib.fakeSha256` and rerun `nix build`.
-          outputHash = "sha256-IXjdJYgUXWcX6/PGy/jc3EDgEzBl2+5zE14XObEgt+k=";
+          outputHash = "sha256-ArmlaUVzM7JvC22+bC+VZw3tffwwE+TV6+rAKMVYh2E=";
         };
 
         tide = pkgs.stdenv.mkDerivation {
