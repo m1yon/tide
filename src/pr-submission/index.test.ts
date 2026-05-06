@@ -151,12 +151,8 @@ describe("countCommitsAhead", () => {
 });
 
 describe("runPrSubmission", () => {
-  it("happy path: pushes the branch, fires the iteration, verifies via gh pr list, returns opened+url", async () => {
+  it("happy path: fires the iteration, verifies via gh pr list, returns opened+url", async () => {
     const { runner, calls } = buildShellRunner([
-      {
-        match: (c) => c.cmd === "git" && c.args[0] === "push",
-        result: { exitCode: 0, stdout: "", stderr: "" },
-      },
       {
         match: (c) =>
           c.cmd === "gh" && c.args[0] === "pr" && c.args[1] === "list",
@@ -203,10 +199,9 @@ describe("runPrSubmission", () => {
       action: "opened",
     });
 
-    // Push happened first.
-    expect(calls[0]?.cmd).toBe("git");
-    expect(calls[0]?.args).toEqual(["push", "-u", "origin", "feature/per-32"]);
-    expect(calls[0]?.cwd).toBe("/repo");
+    // No `git push` is fired by pr-submission — the runner pushes
+    // per-iteration. Only `gh pr list` runs through the shell.
+    expect(calls.every((c) => c.cmd !== "git")).toBe(true);
 
     // The iteration was fired with the right shape. Branch + baseBranch are
     // bound at `createSandbox` time, not on the run-options shape, so the
@@ -260,51 +255,8 @@ describe("runPrSubmission", () => {
     expect(ghCall?.args).toContain("number,url");
   });
 
-  it("throws when git push fails — never reaches the iteration", async () => {
-    let sandboxRunCalled = false;
-    const sandboxRun: SandboxRunFn = (opts) => {
-      sandboxRunCalled = true;
-      return baseSandboxRun(opts);
-    };
-
-    const { runner } = buildShellRunner([
-      {
-        match: (c) => c.cmd === "git" && c.args[0] === "push",
-        result: {
-          exitCode: 1,
-          stdout: "",
-          stderr: "remote: Permission to acme/widget.git denied",
-        },
-      },
-    ]);
-
-    const err = await captureError(
-      runPrSubmission({
-        ghRepo: baseGhRepo,
-        branch: "feature/per-32",
-        baseBranch: "master",
-        parentIdentifier: "MEC-123",
-        parentTitle: "PRD",
-        parentUrl: "https://linear.app/acme/issue/MEC-123",
-        subIssues: [],
-        repoRoot: "/repo",
-        config: baseConfig,
-        sandboxEnv: {},
-        shellRunner: runner,
-        sandboxRun,
-      })
-    );
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/git push.*failed/);
-    expect(sandboxRunCalled).toBe(false);
-  });
-
   it("throws when post-iteration gh pr list returns an empty array", async () => {
     const { runner } = buildShellRunner([
-      {
-        match: (c) => c.cmd === "git" && c.args[0] === "push",
-        result: { exitCode: 0, stdout: "", stderr: "" },
-      },
       {
         match: (c) => c.cmd === "gh",
         result: {
@@ -336,12 +288,7 @@ describe("runPrSubmission", () => {
   });
 
   it("wraps sandcastle thrown errors with a tide-prefixed message", async () => {
-    const { runner } = buildShellRunner([
-      {
-        match: (c) => c.cmd === "git" && c.args[0] === "push",
-        result: { exitCode: 0, stdout: "", stderr: "" },
-      },
-    ]);
+    const { runner } = buildShellRunner([]);
 
     const sandboxRun: SandboxRunFn = () =>
       Promise.reject(new Error("sandbox failed to start"));

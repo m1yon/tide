@@ -32,6 +32,7 @@
 // All Linear writes happen from the host. The sandbox never sees
 // LINEAR_API_KEY (ADR-0005).
 
+import { spawn } from "node:child_process";
 import path from "node:path";
 import {
   createSandbox as defaultCreateSandbox,
@@ -95,6 +96,47 @@ export type SandboxRunFn = (
   opts: SandboxRunOptions
 ) => Promise<SandboxRunResult>;
 
+export interface ShellResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Test seam: a child-process-style shell runner. Same shape as the seam
+ * already in `pr-submission`. Production wires `defaultShellRunner` (a
+ * `node:child_process` spawn); tests pass a stub.
+ */
+export type ShellRunner = (
+  cmd: string,
+  args: readonly string[],
+  cwd: string
+) => Promise<ShellResult>;
+
+async function defaultShellRunner(
+  cmd: string,
+  args: readonly string[],
+  cwd: string
+): Promise<ShellResult> {
+  return await new Promise<ShellResult>((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      reject(err);
+    });
+    child.on("close", (code) => {
+      resolve({ exitCode: code ?? 0, stdout, stderr });
+    });
+  });
+}
+
 export interface RunIssueQueueOptions {
   /** PRD identifier (e.g. "ENG-1") — surfaced in prompt args as PARENT_ID. */
   parentIdentifier: string;
@@ -151,6 +193,10 @@ export interface RunIssueQueueOptions {
   readFinalAssistantMessage?: (logFilePath: string) => Promise<string>;
   /** Test seam — defaults to sandcastle's `createSandbox`. */
   createSandbox?: (opts: CreateSandboxOptions) => Promise<Sandbox>;
+  /** Test seam — defaults to a `node:child_process` spawn. Used to fire
+   * `git push -u origin <branch>` on the host after every working-agent
+   * iteration that produced commits. See ADR-0007. */
+  shellRunner?: ShellRunner;
 }
 
 export interface RunIssueQueueResult {
@@ -289,6 +335,40 @@ async function runSummarizer(args: {
 }
 
 /**
+ * Fire `git push -u origin <branch>` on the host. Failures are warn-and-
+ * continue: per ADR-0007, the queue does not abort on push failure, no
+ * Linear state is mutated, and the next iteration's push naturally carries
+ * forward the previously-missed commits. `-u` sets upstream on the first
+ * push and is a harmless no-op afterwards. With no new commits the call is
+ * a no-op on the remote, so callers in the throw-then-push path don't have
+ * to gate on commit count.
+ */
+async function pushBranchToOrigin(
+  shellRunner: ShellRunner,
+  repoRoot: string,
+  branch: string
+): Promise<void> {
+  let result: ShellResult;
+  try {
+    result = await shellRunner(
+      "git",
+      ["push", "-u", "origin", branch],
+      repoRoot
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.warn(`git push -u origin ${branch} threw: ${msg} — continuing`);
+    return;
+  }
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.trim();
+    log.warn(
+      `git push -u origin ${branch} failed (exit ${String(result.exitCode)})${stderr === "" ? "" : `: ${stderr}`} — continuing`
+    );
+  }
+}
+
+/**
  * Build the path under `<repoRoot>/.tide/logs/` where one specific run's
  * log file lands. Sandcastle's default file path lives under
  * `.sandcastle/logs/` (which the host bridges to `.tide/logs/` via a
@@ -334,6 +414,7 @@ export async function runIssueQueue(
   const readFinalAssistantMessage =
     options.readFinalAssistantMessage ?? defaultReadFinalAssistantMessage;
   const createSandboxFn = options.createSandbox ?? defaultCreateSandbox;
+  const shellRunner = options.shellRunner ?? defaultShellRunner;
 
   // Fetch the parent body once for PRD_CONTENT — it's stable across the loop.
   const parentContent = await fetchIssueContentFn(linearCtx, parentId);
@@ -441,6 +522,11 @@ export async function runIssueQueue(
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(`${ordered.identifier} threw: ${msg}`);
+        // The agent may have committed before the throw; those commits are
+        // real on disk via the bind mount. Push best-effort so partial work
+        // ships before the queue aborts. `git push` with no new commits is
+        // a no-op, so we don't gate on commit count here.
+        await pushBranchToOrigin(shellRunner, repoRoot, branch);
         return {
           completed,
           flipped,
@@ -449,6 +535,14 @@ export async function runIssueQueue(
             reason: `run() threw: ${msg}`,
           },
         };
+      }
+
+      // Per ADR-0007: push after every working-agent iteration that
+      // produced commits, regardless of the iteration's classification
+      // (DONE, BLOCKED, or agent-FAIL). Push failure is warn-and-continue;
+      // Linear state is not touched by push failure.
+      if (result.commits.length > 0) {
+        await pushBranchToOrigin(shellRunner, repoRoot, branch);
       }
 
       const verdict = classifyRun(result);
