@@ -128,6 +128,39 @@ export function pickWorkflowStateByType(
   return best?.id;
 }
 
+export interface NamedWorkflowStateRef {
+  id: string;
+  name: string;
+  type: string;
+  position: number;
+}
+
+/**
+ * Pure helper. Given a set of workflow states, a target `name`, and an
+ * optional `state.type` constraint, return the id of the lowest-`position`
+ * state matching both, or undefined when no state matches.
+ *
+ * Complements `pickWorkflowStateByType`. Used to resolve states whose
+ * identity is defined by an exact name (e.g. "In Review") rather than by
+ * Linear's coarse `state.type` taxonomy. Name match is case-sensitive; the
+ * optional `type` argument lets callers reject same-name states of the
+ * wrong type. Duplicate-name conflicts are broken deterministically by
+ * lowest `position`.
+ */
+export function pickWorkflowStateByName(
+  states: readonly NamedWorkflowStateRef[],
+  name: string,
+  type?: string
+): string | undefined {
+  let best: NamedWorkflowStateRef | undefined;
+  for (const s of states) {
+    if (s.name !== name) continue;
+    if (type !== undefined && s.type !== type) continue;
+    if (!best || s.position < best.position) best = s;
+  }
+  return best?.id;
+}
+
 /**
  * Filter shape consumed by `listPRDs` via the SDK's `issues` method. The
  * production caller passes the real `LinearClient`; tests pass a hand-rolled
@@ -300,8 +333,7 @@ export async function listStandaloneIssues(
   ctx: LinearContext,
   _client?: ListStandaloneIssuesClient
 ): Promise<StandaloneIssue[]> {
-  const c: ListStandaloneIssuesClient =
-    _client ?? (client(ctx.apiKey));
+  const c: ListStandaloneIssuesClient = _client ?? client(ctx.apiKey);
   const teamId = await findTeamId(c, ctx.teamKey);
 
   const [conn, statesConn] = await Promise.all([
@@ -607,6 +639,7 @@ const ISSUE_TEAM_STATES_QUERY = /* GraphQL */ `
         states(first: 100) {
           nodes {
             id
+            name
             type
             position
           }
@@ -628,7 +661,7 @@ interface IssueTeamStatesNode {
   id: string;
   team: {
     states: {
-      nodes: { id: string; type: string; position: number }[];
+      nodes: { id: string; name: string; type: string; position: number }[];
     };
   };
 }
@@ -703,6 +736,59 @@ export async function transitionToDone(
 ): Promise<void> {
   const request = _request ?? rawRequest(ctx.apiKey);
   await transitionIssueTo(ctx, issueId, "completed", request);
+}
+
+/**
+ * Transition the given Linear issue to its team's `"In Review"` workflow
+ * state. The state is resolved by exact name (case-sensitive) constrained
+ * to `state.type === "started"`, so a same-named state of the wrong type
+ * does not satisfy the lookup. Duplicate `"In Review"` states with the
+ * `started` type are broken by lowest `position`.
+ *
+ * Unlike `transitionToInProgress` / `transitionToDone`, the target state
+ * is identified by name because Linear's `state.type` taxonomy lumps "In
+ * Progress" and "In Review" together as `started`. The contract is: the
+ * team has a state literally named `"In Review"`, or `tide setup`
+ * provisions one.
+ *
+ * Throws when the issue id does not resolve, when the team has no
+ * matching `"In Review"` state (with a hint pointing at `tide setup`), or
+ * when the SDK reports `success: false`.
+ *
+ * `_request` is a test seam — production callers omit it.
+ */
+export async function transitionToInReview(
+  ctx: LinearContext,
+  issueId: string,
+  _request?: LinearGqlRequest
+): Promise<void> {
+  const request = _request ?? rawRequest(ctx.apiKey);
+  const data = await request<{ issue: IssueTeamStatesNode | null }>(
+    ISSUE_TEAM_STATES_QUERY,
+    { id: issueId }
+  );
+  if (!data.issue) {
+    throw new Error(`Linear issue with id "${issueId}" not found.`);
+  }
+  const stateId = pickWorkflowStateByName(
+    data.issue.team.states.nodes,
+    "In Review",
+    "started"
+  );
+  if (stateId === undefined) {
+    throw new Error(
+      `No workflow state named "In Review" exists on the team for issue "${issueId}". ` +
+        `Run \`tide setup\` to provision it.`
+    );
+  }
+  const mutationResult = await request<{
+    issueUpdate: { success: boolean };
+  }>(ISSUE_TRANSITION_MUTATION, { id: issueId, stateId });
+  if (!mutationResult.issueUpdate.success) {
+    throw new Error(
+      `Linear issueUpdate for "${issueId}" returned success=false.`
+    );
+  }
 }
 
 const ISSUE_LABELS_FOR_FLIP_QUERY = /* GraphQL */ `
