@@ -770,6 +770,59 @@ describe("buildOrderedQueue", () => {
     }
   });
 
+  test("errors with a ready-for-human-direct-child shape when the blocker is a direct child flagged for humans", () => {
+    // ENG-2 (in scope) is blocked by ENG-1, which IS a direct child of the
+    // picked PRD but carries `ready-for-human` (typically the residue of a
+    // previous run's flip). The error must point at the actual fix
+    // (re-label / remove relationship) instead of mis-claiming the blocker
+    // is outside the PRD.
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        identifier: "ENG-1",
+        labels: ["ready-for-human"],
+      }),
+      makeSubIssue({
+        identifier: "ENG-2",
+        labels: ["ready-for-agent"],
+        blockedBy: ["ENG-1"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.message).toContain("ENG-2");
+      expect(r.message).toContain("ENG-1");
+      expect(r.message).toContain("direct child");
+      expect(r.message).toContain("ready-for-human");
+      expect(r.message).not.toContain("outside the picked PRD's children");
+    }
+  });
+
+  test("errors with an unlabeled-direct-child shape when the blocker is a direct child missing ready-for-agent", () => {
+    // Same as above, but the blocker has no `ready-for-human` label either —
+    // it's just unlabeled (paused). The error should still surface the fact
+    // that it's a direct child rather than claiming it's outside the PRD.
+    const subs: SubIssue[] = [
+      makeSubIssue({
+        identifier: "ENG-1",
+        labels: [],
+      }),
+      makeSubIssue({
+        identifier: "ENG-2",
+        labels: ["ready-for-agent"],
+        blockedBy: ["ENG-1"],
+      }),
+    ];
+    const r = buildOrderedQueue(subs);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.message).toContain("ENG-1");
+      expect(r.message).toContain("direct child");
+      expect(r.message).toContain("ready-for-agent");
+      expect(r.message).not.toContain("outside the picked PRD's children");
+    }
+  });
+
   test("errors with a cycle message when scoped sub-issues form a cycle", () => {
     const subs: SubIssue[] = [
       makeSubIssue({

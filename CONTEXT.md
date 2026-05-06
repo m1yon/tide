@@ -1,6 +1,20 @@
 # Tide
 
-CLI that runs a queue of agent iterations against a PRD-rooted workplan, tracked in Linear, with code/PRs on GitHub.
+CLI that runs a queue of **agent** **iterations** against a PRD-rooted workplan, tracked in Linear, with code/PRs on GitHub. Built on **sandcastle**, which owns the **sandbox** / **host** / **iteration** primitives.
+
+## Inherited from sandcastle
+
+These terms come from [sandcastle's CONTEXT.md](https://github.com/ai-hero/sandcastle) and apply unchanged in tide. Definitions live there; this section names what tide relies on so the rest of this glossary can build on it.
+
+- **Sandbox**, **Host**, **Agent** — the core triplet. Tide is the **host**-side orchestrator; one **agent** runs inside one **sandbox** per **iteration**.
+- **Iteration** — a single `sandbox.run(...)` call. `tide run` chains many.
+- **Sandbox provider** / **Bind-mount sandbox provider** — tide uses sandcastle's Docker bind-mount provider; no other providers are wired up.
+- **Branch strategy** — tide uses the `branch` strategy with the **PRD**'s Linear-auto-generated `branchName` (see ADR 0006).
+- **Worktree** — git worktree on the **host**, mounted into the **sandbox**.
+- **Prompt template**, **Prompt argument**, **Shell expression** — tide's working-agent prompt at `.tide/prompt.md` is a sandcastle **prompt template**; values are passed via `promptArgs`.
+- **Completion signal** — sandcastle's `<promise>…</promise>` termination marker. Tide overrides sandcastle's default `COMPLETE` payload; see **DONE signal** and **BLOCKED signal** below.
+- **Backlog manager** — sandcastle's role for "pluggable task source". Linear plays this role for tide; the role is not actually pluggable in tide.
+- **Log-to-file mode** — tide forces `logging: { type: 'file' }`; logs land under `.tide/logs/` and the summarizer reads the working agent's transcript from there.
 
 ## Language
 
@@ -27,16 +41,19 @@ A **PRD** with no `ready-for-agent` children. Tide treats the **PRD** itself as 
 - A **PRD** carries both `prd` and `ready-for-agent`; a **Sub-issue** carries only `ready-for-agent`.
 
 **DONE signal**:
-The agent emits `<promise>DONE</promise>` to declare a **Sub-issue** complete. Tide host then transitions the **Sub-issue** to Linear's _Done_ state.
+A sandcastle **completion signal** with the payload `DONE`. The **agent** emits `<promise>DONE</promise>` to declare a **Sub-issue** complete; the **host** then transitions the **Sub-issue** to Linear's _Done_ state. Overrides sandcastle's default `COMPLETE` payload.
 
 **BLOCKED signal**:
-The agent emits `<promise>BLOCKED</promise>` to declare it can't finish. Tide spawns a follow-up summarizer agent that writes a few-sentence reason; tide posts that reason as a Linear comment on the **Sub-issue**, swaps the **Sub-issue**'s label from `ready-for-agent` to `ready-for-human`, and continues to the next queued **Sub-issue**. The **Sub-issue**'s Linear workflow state stays at _In Progress_.
+A sandcastle **completion signal** with the payload `BLOCKED`. The **agent** emits `<promise>BLOCKED</promise>` to declare it can't finish. The **host** then spawns a follow-up **summarizer agent** that writes a few-sentence reason; the **host** posts that reason as a Linear comment on the **Sub-issue**, swaps the **Sub-issue**'s label from `ready-for-agent` to `ready-for-human`, and continues to the next queued **Sub-issue**. The **Sub-issue**'s Linear workflow state stays at _In Progress_. Overrides sandcastle's default `COMPLETE` payload.
 
 **`ready-for-human` label**:
 Tide's signal that a **Sub-issue** needs a human before it's queueable again. Set by tide on BLOCKED and on agent-driven FAIL; the human resolves the cause, swaps the label back to `ready-for-agent`, and re-runs.
 
+**Working agent**:
+The primary role tide plays the **agent** in: doing the engineering work for one **Sub-issue** in one **iteration**. Driven by the **prompt template** at `.tide/prompt.md`. Always runs first; emits the **DONE signal** or **BLOCKED signal**.
+
 **Summarizer agent**:
-A second agent invocation, with its own prompt, that runs after a BLOCKED or agent-driven FAIL exit. Runs in the _same_ reusable sandbox as the working agent (via `createSandbox` + multiple `sandbox.run(...)` calls). Receives the working agent's transcript plus the **Sub-issue** and **PRD** Linear bodies as prompt context. Its concise final assistant message becomes a Linear comment on the **Sub-issue**. Different prompt per trigger (`blocked-summary` vs `fail-summary`).
+A second **agent** invocation, with its own prompt, that runs after a BLOCKED or agent-driven FAIL exit. Runs in the _same_ **reusable sandbox** as the **working agent** (via `createSandbox` + multiple `sandbox.run(...)` calls). Receives the **working agent**'s transcript plus the **Sub-issue** and **PRD** Linear bodies as prompt context. Its concise final assistant message becomes a Linear comment on the **Sub-issue**. Different prompt per trigger (`blocked-summary` vs `fail-summary`).
 
 **Reusable sandbox**:
 A single docker container, created once at the start of `tide run` via sandcastle's `createSandbox`, and reused across every working-agent iteration _and_ every summarizer invocation in the queue. Replaces today's pattern of one fresh container per `run()` call.
@@ -53,3 +70,5 @@ The feature branch's name comes verbatim from the **PRD**'s Linear-auto-generate
 ## Flagged ambiguities
 
 - Old `PRD` label (capital, per ADR 0002) meant "tide-created mirror of a GitHub parent". New `prd` (lowercase) means "user-declared tide-runnable PRD". Different semantics — ADR 0002 will be superseded.
+- Sandcastle's default **completion signal** payload is `COMPLETE` (single binary). Tide replaces it with two payloads — `DONE` (success) and `BLOCKED` (graceful abort) — riding the same `<promise>…</promise>` mechanism. Reading sandcastle docs, "completion" maps to either of tide's signals.
+- Branch placeholders in prompts use sandcastle's built-in names `{{SOURCE_BRANCH}}` / `{{TARGET_BRANCH}}`, not legacy `{{BRANCH}}` / `{{BASE_BRANCH}}`. Sandcastle injects them automatically from the `branch` / `baseBranch` passed to `createSandbox`, and rejects any attempt to override them via `promptArgs`. Old user prompts referencing `{{BRANCH}}` will fail to substitute after upgrade.

@@ -9,7 +9,7 @@ const baseParent: IssueContent = {
 };
 
 describe("buildPromptArgs", () => {
-  it("renders an issue with title, body, and a single comment with all six keys present", () => {
+  it("renders an issue with title, body, and a single comment with the five non-branch keys present", () => {
     const issue: IssueContent = {
       identifier: "ENG-104",
       title: "Sub-issue four",
@@ -19,15 +19,12 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-1-foo",
-      baseBranch: "master",
     });
 
-    // All seven keys present.
+    // SOURCE_BRANCH / TARGET_BRANCH are injected by sandcastle and must not
+    // appear here — overriding them via promptArgs is rejected by the SDK.
     expect(Object.keys(args).sort()).toEqual(
       [
-        "BASE_BRANCH",
-        "BRANCH",
         "ISSUE_CONTENT",
         "ISSUE_ID",
         "ISSUE_TITLE",
@@ -36,12 +33,9 @@ describe("buildPromptArgs", () => {
       ].sort()
     );
 
-    // Linear identifiers pass through as plain strings.
     expect(args.ISSUE_ID).toBe("ENG-104");
     expect(args.PARENT_ID).toBe("ENG-100");
     expect(args.ISSUE_TITLE).toBe("Sub-issue four");
-    expect(args.BRANCH).toBe("feature/mec-1-foo");
-    expect(args.BASE_BRANCH).toBe("master");
     expect(args.PRD_CONTENT).toBe("This PRD describes the example feature.");
 
     // ISSUE_CONTENT markdown structure.
@@ -71,12 +65,9 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-2-bar",
-      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Body");
-    // The placeholder is present so the structure is stable.
     expect(content).toMatch(/### Body\s+\n\s*_\(no body\)_/);
   });
 
@@ -90,8 +81,6 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-3-baz",
-      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Title");
@@ -109,8 +98,6 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-4-qux",
-      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("`code`");

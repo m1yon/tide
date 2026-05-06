@@ -1,16 +1,16 @@
 // Pure module: render the per-issue `promptArgs` record for a `run()` call.
 //
-// The seven keys correspond to `{{KEY}}` placeholders in `.tide/prompt.md`:
-//   - ISSUE_ID:      the Linear identifier of the sub-issue (e.g. "ENG-7")
-//   - ISSUE_TITLE:   the issue's title string
-//   - ISSUE_CONTENT: a markdown block with `Title`, `Body`, and `Comments`
-//                    sub-sections (Comments omitted if there are none)
-//   - PRD_CONTENT:   the parent PRD's raw markdown body
-//   - PARENT_ID:     the parent PRD's Linear identifier (e.g. "ENG-1")
-//   - BRANCH:        the Linear-derived feature branch name (used verbatim)
-//   - BASE_BRANCH:   the branch the PR will merge into (e.g. "master") —
-//                    feeds the in-prompt `git log <base>..HEAD` recent-commits
-//                    summary
+// The five keys correspond to `{{KEY}}` placeholders in `.tide/prompt.md`:
+//   - ISSUE_ID:       the Linear identifier of the sub-issue (e.g. "ENG-7")
+//   - ISSUE_TITLE:    the issue's title string
+//   - ISSUE_CONTENT:  a markdown block with `Title`, `Body`, and `Comments`
+//                     sub-sections (Comments omitted if there are none)
+//   - PRD_CONTENT:    the parent PRD's raw markdown body
+//   - PARENT_ID:      the parent PRD's Linear identifier (e.g. "ENG-1")
+//
+// SOURCE_BRANCH and TARGET_BRANCH are NOT included: sandcastle injects them
+// as built-in prompt arguments (driven by `branch`/`baseBranch` passed to
+// `createSandbox`) and rejects any attempt to override them via promptArgs.
 //
 // Markdown special characters in body / comments pass through unmodified
 // (no escaping). An empty body still renders the `Body` sub-section with a
@@ -26,8 +26,6 @@ export interface IssueContent {
 export interface BuildPromptArgsInput {
   issue: IssueContent;
   parent: IssueContent;
-  branch: string;
-  baseBranch: string;
 }
 
 export type PromptArgsRecord = Record<string, string | number | boolean>;
@@ -59,14 +57,12 @@ function renderIssueContent(issue: IssueContent): string {
 }
 
 export function buildPromptArgs(input: BuildPromptArgsInput): PromptArgsRecord {
-  const { issue, parent, branch, baseBranch } = input;
+  const { issue, parent } = input;
   return {
     ISSUE_ID: issue.identifier,
     ISSUE_TITLE: issue.title,
     ISSUE_CONTENT: renderIssueContent(issue),
     PRD_CONTENT: parent.body,
     PARENT_ID: parent.identifier,
-    BRANCH: branch,
-    BASE_BRANCH: baseBranch,
   };
 }

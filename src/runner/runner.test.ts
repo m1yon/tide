@@ -749,7 +749,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
 });
 
 describe("runIssueQueue — prompt args + sandcastle wiring", () => {
-  test("registers both DONE and BLOCKED signals with sandcastle and forwards baseBranch as BASE_BRANCH", async () => {
+  test("registers both DONE and BLOCKED signals with sandcastle and surfaces sub-issue identity in promptArgs", async () => {
     let capturedOpts: SandboxRunOptions | undefined;
 
     await runIssueQueue({
@@ -782,9 +782,11 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       BLOCKED_SIGNAL,
     ]);
     const args = capturedOpts.promptArgs as Record<string, string>;
-    expect(args.BASE_BRANCH).toBe("main");
-    expect(args.BRANCH).toBe("user/feature/eng-7");
     expect(args.ISSUE_ID).toBe("ENG-7");
+    // SOURCE_BRANCH / TARGET_BRANCH are sandcastle built-ins; they must not
+    // appear in promptArgs (the SDK rejects overrides).
+    expect(args.SOURCE_BRANCH).toBeUndefined();
+    expect(args.TARGET_BRANCH).toBeUndefined();
   });
 
   test("working-agent run uses file-based logging so the summarizer can read the transcript", async () => {

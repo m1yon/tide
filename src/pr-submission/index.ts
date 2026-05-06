@@ -17,10 +17,17 @@
 
 import { spawn } from "node:child_process";
 import { log } from "@clack/prompts";
-import { run as defaultSandcastleRun, claudeCode } from "@ai-hero/sandcastle";
+import {
+  createSandbox as defaultCreateSandbox,
+  claudeCode,
+  type CreateSandboxOptions,
+  type Sandbox,
+  type SandboxRunOptions,
+} from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { GhRepo } from "../github/index.ts";
+import { DONE_SIGNAL, type SandboxRunFn } from "../runner/index.ts";
 
 export interface ShellResult {
   exitCode: number;
@@ -33,8 +40,6 @@ export type ShellRunner = (
   args: readonly string[],
   cwd: string
 ) => Promise<ShellResult>;
-
-export type SandcastleRun = typeof defaultSandcastleRun;
 
 export interface SubIssueRef {
   number: number;
@@ -63,7 +68,13 @@ export interface RunPrSubmissionOptions {
   sandboxEnv: Record<string, string>;
   // Test seams.
   shellRunner?: ShellRunner;
-  sandcastleRun?: SandcastleRun;
+  /** Test seam — when provided, no real sandbox is created and the function
+   * is called in place of `sandbox.run(...)`. Defaults to a real
+   * `sandbox.run.bind(sandbox)` of a `Sandbox` built via `createSandbox`. */
+  sandboxRun?: SandboxRunFn;
+  /** Test seam — defaults to sandcastle's `createSandbox`. Only consulted
+   * when `sandboxRun` is not provided. */
+  createSandbox?: (opts: CreateSandboxOptions) => Promise<Sandbox>;
 }
 
 export interface PrSubmissionResult {
@@ -169,7 +180,7 @@ export async function resolveBaseBranch(
 // require a two-phase create-then-edit flow to inject post-creation URLs.
 const PR_PROMPT_TEMPLATE = `You are submitting a pull request for parent PRD {{PARENT_ID}}: {{PARENT_TITLE}}.
 
-The current working branch is \`{{BRANCH}}\` (already pushed to origin). Open a pull request against the base branch \`{{BASE_BRANCH}}\` for the repository \`{{REPO_OWNER}}/{{REPO_NAME}}\`.
+The current working branch is \`{{SOURCE_BRANCH}}\` (already pushed to origin). Open a pull request against the base branch \`{{TARGET_BRANCH}}\` for the repository \`{{REPO_OWNER}}/{{REPO_NAME}}\`.
 
 # Context
 
@@ -242,15 +253,15 @@ Run \`gh pr create\` against the right base. A safe invocation:
 
     gh pr create \\
       --repo {{REPO_OWNER}}/{{REPO_NAME}} \\
-      --base {{BASE_BRANCH}} \\
-      --head {{BRANCH}} \\
+      --base {{TARGET_BRANCH}} \\
+      --head {{SOURCE_BRANCH}} \\
       --title "<your title here>" \\
       --body-file <(cat <<'PR_BODY_EOF'
     <your fully-rendered body here, with no closing magic word>
     PR_BODY_EOF
     )
 
-When the PR has been opened successfully, emit <promise>COMPLETE</promise> and exit. Do not edit any files in the working tree.
+When the PR has been opened successfully, emit <promise>DONE</promise> and exit. Do not edit any files in the working tree.
 `;
 
 export interface BuildPrPromptArgsInput {
@@ -298,8 +309,8 @@ export function buildPrPromptArgs(
     PARENT_ID: input.parentIdentifier,
     PARENT_TITLE: sanitizeInline(input.parentTitle),
     PARENT_URL: input.parentUrl,
-    BRANCH: input.branch,
-    BASE_BRANCH: input.baseBranch,
+    SOURCE_BRANCH: input.branch,
+    TARGET_BRANCH: input.baseBranch,
     REPO_OWNER: input.repoOwner,
     REPO_NAME: input.repoName,
     SUB_ISSUES: renderSubIssues(input.subIssues),
@@ -376,8 +387,8 @@ export async function runPrSubmission(
     config,
     sandboxEnv,
     shellRunner = defaultShellRunner,
-    sandcastleRun = defaultSandcastleRun,
   } = options;
+  const createSandboxFn = options.createSandbox ?? defaultCreateSandbox;
 
   // Step 1: push the branch to origin host-side. Surfacing push errors here
   // (rather than wrapping them inside an LLM iteration failure) keeps the
@@ -395,9 +406,10 @@ export async function runPrSubmission(
     );
   }
 
-  // Step 2: fire the Sandcastle iteration with the bundled, interface-
+  // Step 2: fire the sandcastle iteration with the bundled, interface-
   // emphasizing prompt. Inline `prompt` (not `promptFile`) — the template
-  // ships in tide source and is not user-editable.
+  // ships in tide source and is not user-editable. Uses the reusable-sandbox
+  // pattern (`createSandbox` + `sandbox.run`) to match the runner's API.
   const promptArgs = buildPrPromptArgs({
     parentIdentifier,
     parentTitle,
@@ -410,34 +422,55 @@ export async function runPrSubmission(
   });
   const prompt = applyPromptTemplate(PR_PROMPT_TEMPLATE, promptArgs);
 
-  const sandbox = docker({
-    mounts: config.sandbox.mounts,
-    env: sandboxEnv,
-  });
-
-  try {
-    // The iteration produces no commit by design — its output is observable
-    // via `gh pr list` below, not via the RunResult, so we discard the result.
-    await sandcastleRun({
-      name: "tide-pr",
+  // When tests inject `sandboxRun`, no real sandbox is created or closed.
+  // Production callers omit it and we build a one-shot sandbox here.
+  let sandbox: Sandbox | undefined;
+  let sandboxRun: SandboxRunFn;
+  if (options.sandboxRun !== undefined) {
+    sandboxRun = options.sandboxRun;
+  } else {
+    sandbox = await createSandboxFn({
+      branch,
+      baseBranch,
       cwd: repoRoot,
-      sandbox,
-      agent: claudeCode("claude-opus-4-7"),
-      prompt,
-      maxIterations: 1,
-      branchStrategy: { type: "branch", branch },
-      logging: { type: "stdout" },
+      sandbox: docker({
+        mounts: config.sandbox.mounts,
+        env: sandboxEnv,
+      }),
       hooks: {
         sandbox: {
           onSandboxReady: config.hooks.onSandboxReady,
         },
       },
     });
+    sandboxRun = sandbox.run.bind(sandbox);
+  }
+
+  try {
+    // The iteration produces no commit by design — its output is observable
+    // via `gh pr list` below, not via the SandboxRunResult, so we discard
+    // the result. Registering DONE_SIGNAL is informational: maxIterations=1
+    // already caps the loop, but matching the runner's exit vocabulary
+    // keeps the agent's prompt instructions consistent.
+    await sandboxRun({
+      name: "tide-pr",
+      agent: claudeCode("claude-opus-4-7"),
+      prompt,
+      maxIterations: 1,
+      logging: { type: "stdout" },
+      completionSignal: [DONE_SIGNAL],
+    } satisfies SandboxRunOptions);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`tide: PR submission iteration threw: ${msg}`, {
       cause: err,
     });
+  } finally {
+    if (sandbox !== undefined) {
+      await sandbox.close().catch(() => {
+        /* swallow close errors — best-effort cleanup */
+      });
+    }
   }
 
   // Step 3: verify host-side that a PR now exists for the branch.

@@ -219,6 +219,24 @@ export function buildOrderedQueue(
   if (!result.ok) {
     if (result.error.kind === "external-blocker") {
       const { issue, blocker } = result.error;
+      // The blocker is in the picked PRD's direct children iff it appears in
+      // `closedAmongDirectChildren` (which maps every direct child, not just
+      // in-scope ones). Distinguish "out-of-scope direct child" from "truly
+      // outside the PRD" so the message points at the right fix.
+      const blockerDirectChild = subIssues.find(
+        (s) => s.identifier === blocker
+      );
+      if (blockerDirectChild) {
+        const labelHint = blockerDirectChild.labels.includes(READY_FOR_HUMAN)
+          ? "carries `ready-for-human` (flagged for human review)"
+          : "is missing the `ready-for-agent` label";
+        return {
+          kind: "error",
+          message:
+            `Sub-issue ${issue} is blocked by ${blocker}, a direct child of the picked PRD that ${labelHint}.\n` +
+            `Resolve in Linear: re-add \`ready-for-agent\` to the blocker, remove the relationship, or close the blocker.`,
+        };
+      }
       return {
         kind: "error",
         message:

@@ -415,8 +415,6 @@ export async function runIssueQueue(
       const promptArgs = buildPromptArgs({
         issue: issueContent,
         parent: { ...parentContent, identifier: parentIdentifier },
-        branch,
-        baseBranch,
       });
 
       const workingLogPath = buildLogPath({

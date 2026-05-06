@@ -72,7 +72,7 @@ describe("tide init", () => {
     expect(dockerfile.toLowerCase()).toContain("claude-code");
   });
 
-  test("prompt.md template contains all six placeholders", () => {
+  test("prompt.md template contains every {{KEY}} placeholder the runner substitutes", () => {
     init({ repoRoot, stdout: captureStdout, stderr: captureStderr });
     const prompt = readFileSync(join(repoRoot, ".tide", "prompt.md"), "utf8");
     expect(prompt).toContain("{{ISSUE_ID}}");
@@ -80,7 +80,8 @@ describe("tide init", () => {
     expect(prompt).toContain("{{ISSUE_CONTENT}}");
     expect(prompt).toContain("{{PRD_CONTENT}}");
     expect(prompt).toContain("{{PARENT_ID}}");
-    expect(prompt).toContain("{{BRANCH}}");
+    expect(prompt).toContain("{{SOURCE_BRANCH}}");
+    expect(prompt).toContain("{{TARGET_BRANCH}}");
   });
 
   test(".env.example documents the required key plus both auth alternatives", () => {
