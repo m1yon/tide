@@ -5,78 +5,72 @@
 // among open issues are reported as `cycle` errors.
 //
 // Among nodes that become simultaneously unblocked the deterministic
-// tiebreaker is issue-number ascending.
+// tiebreaker is identifier ascending (lexicographic).
 
 export interface DepNode {
-  number: number;
-  blockedBy: number[];
+  id: string;
+  blockedBy: string[];
   closed: boolean;
 }
 
 export interface CycleEdge {
-  from: number;
-  to: number;
+  from: string;
+  to: string;
 }
 
 export type TopoResult =
-  | { ok: true; order: number[] }
+  | { ok: true; order: string[] }
   | {
       ok: false;
       error:
         | { kind: "cycle"; edges: CycleEdge[] }
-        | { kind: "external-blocker"; issue: number; blocker: number };
+        | { kind: "external-blocker"; issue: string; blocker: string };
     };
 
 export function topoSort(nodes: DepNode[]): TopoResult {
-  const numbers = new Set(nodes.map((n) => n.number));
-  const closed = new Map(nodes.map((n) => [n.number, n.closed]));
+  const ids = new Set(nodes.map((n) => n.id));
+  const closed = new Map(nodes.map((n) => [n.id, n.closed]));
 
   // Build the effective blockedBy edges: drop blockers that are closed (they
   // can't block) and surface external open blockers as errors.
-  const effective = new Map<number, Set<number>>();
+  const effective = new Map<string, Set<string>>();
   for (const node of nodes) {
-    const filtered = new Set<number>();
+    const filtered = new Set<string>();
     for (const blocker of node.blockedBy) {
-      if (!numbers.has(blocker)) {
-        // Blocker not in our scope. If it's a closed-and-thus-irrelevant
-        // issue we'd never see it here at all (the caller should have
-        // filtered the GitHub state of external refs); to be safe, report
-        // anything we can't prove is closed as external.
+      if (!ids.has(blocker)) {
         return {
           ok: false,
-          error: { kind: "external-blocker", issue: node.number, blocker },
+          error: { kind: "external-blocker", issue: node.id, blocker },
         };
       }
       if (closed.get(blocker)) continue;
       filtered.add(blocker);
     }
-    effective.set(node.number, filtered);
+    effective.set(node.id, filtered);
   }
 
   // Cycle detection via DFS over the open-issue subgraph. Closed nodes are
   // also excluded from the sort output (they're already done — emitting them
   // would re-enqueue completed work).
-  const open = nodes.filter((n) => !n.closed).map((n) => n.number);
+  const open = nodes.filter((n) => !n.closed).map((n) => n.id);
   const openSet = new Set(open);
 
   const WHITE = 0;
   const GRAY = 1;
   const BLACK = 2;
-  const color = new Map<number, number>();
+  const color = new Map<string, number>();
   for (const n of open) color.set(n, WHITE);
 
-  const stack: number[] = [];
+  const stack: string[] = [];
 
-  function visit(n: number): { ok: true } | { ok: false; cycle: CycleEdge[] } {
+  function visit(n: string): { ok: true } | { ok: false; cycle: CycleEdge[] } {
     color.set(n, GRAY);
     stack.push(n);
     const blockers = effective.get(n) ?? new Set();
-    // Sort for determinism in the error path's edge list.
-    for (const blocker of [...blockers].sort((a, b) => a - b)) {
+    for (const blocker of [...blockers].sort()) {
       if (!openSet.has(blocker)) continue;
       const c = color.get(blocker);
       if (c === GRAY) {
-        // Found a back-edge — extract the cycle path.
         const idx = stack.indexOf(blocker);
         const cyclePath = stack.slice(idx);
         cyclePath.push(blocker);
@@ -108,10 +102,10 @@ export function topoSort(nodes: DepNode[]): TopoResult {
     }
   }
 
-  // Kahn's algorithm with an issue-number-asc tiebreaker. Edges point from
+  // Kahn's algorithm with an identifier-asc tiebreaker. Edges point from
   // blocker -> blocked (a blocker must come first in topo order).
-  const indeg = new Map<number, number>();
-  const outEdges = new Map<number, Set<number>>();
+  const indeg = new Map<string, number>();
+  const outEdges = new Map<string, Set<string>>();
   for (const n of open) {
     indeg.set(n, 0);
     outEdges.set(n, new Set());
@@ -125,10 +119,8 @@ export function topoSort(nodes: DepNode[]): TopoResult {
     }
   }
 
-  const ready = open
-    .filter((n) => (indeg.get(n) ?? 0) === 0)
-    .sort((a, b) => a - b);
-  const order: number[] = [];
+  const ready = open.filter((n) => (indeg.get(n) ?? 0) === 0).sort();
+  const order: string[] = [];
   while (ready.length > 0) {
     const n = ready.shift();
     if (n === undefined) break;

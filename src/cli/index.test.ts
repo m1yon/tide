@@ -69,4 +69,10 @@ describe("tide cli dispatcher", () => {
     expect(code).toBe(1);
     expect(stderrChunks.join("")).toContain("unknown command");
   });
+
+  test("help text lists the setup subcommand", () => {
+    const code = run(["bun", "tide", "--help"]);
+    expect(code).toBe(0);
+    expect(stdoutChunks.join("")).toContain("setup");
+  });
 });

@@ -2,16 +2,16 @@ import { describe, it, expect } from "bun:test";
 import { buildPromptArgs, type IssueContent } from "./index.ts";
 
 const baseParent: IssueContent = {
-  number: 100,
+  identifier: "ENG-100",
   title: "PRD: example feature",
   body: "This PRD describes the example feature.",
   comments: [],
 };
 
 describe("buildPromptArgs", () => {
-  it("renders an issue with title, body, and a single comment with all six keys present", () => {
+  it("renders an issue with title, body, and a single comment with the five non-branch keys present", () => {
     const issue: IssueContent = {
-      number: 104,
+      identifier: "ENG-104",
       title: "Sub-issue four",
       body: "Implement the runner.",
       comments: ["Looks good to me."],
@@ -19,13 +19,12 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-1-foo",
     });
 
-    // All six keys present.
+    // SOURCE_BRANCH / TARGET_BRANCH are injected by sandcastle and must not
+    // appear here — overriding them via promptArgs is rejected by the SDK.
     expect(Object.keys(args).sort()).toEqual(
       [
-        "BRANCH",
         "ISSUE_CONTENT",
         "ISSUE_ID",
         "ISSUE_TITLE",
@@ -34,11 +33,9 @@ describe("buildPromptArgs", () => {
       ].sort()
     );
 
-    // Numeric IDs pass through as plain integers (per spec).
-    expect(args.ISSUE_ID).toBe(104);
-    expect(args.PARENT_ID).toBe(100);
+    expect(args.ISSUE_ID).toBe("ENG-104");
+    expect(args.PARENT_ID).toBe("ENG-100");
     expect(args.ISSUE_TITLE).toBe("Sub-issue four");
-    expect(args.BRANCH).toBe("feature/mec-1-foo");
     expect(args.PRD_CONTENT).toBe("This PRD describes the example feature.");
 
     // ISSUE_CONTENT markdown structure.
@@ -60,7 +57,7 @@ describe("buildPromptArgs", () => {
 
   it("retains the Body sub-section with a placeholder when the body is empty", () => {
     const issue: IssueContent = {
-      number: 200,
+      identifier: "ENG-200",
       title: "Empty body issue",
       body: "",
       comments: [],
@@ -68,17 +65,15 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-2-bar",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Body");
-    // The placeholder is present so the structure is stable.
     expect(content).toMatch(/### Body\s+\n\s*_\(no body\)_/);
   });
 
   it("omits the Comments sub-section entirely when there are zero comments", () => {
     const issue: IssueContent = {
-      number: 201,
+      identifier: "ENG-201",
       title: "No comments issue",
       body: "Body text.",
       comments: [],
@@ -86,7 +81,6 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-3-baz",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Title");
@@ -96,7 +90,7 @@ describe("buildPromptArgs", () => {
 
   it("passes markdown special characters through verbatim (no escaping)", () => {
     const issue: IssueContent = {
-      number: 202,
+      identifier: "ENG-202",
       title: "Markdown specials",
       body: "Body with `code`, **bold**, [link](url), and a list:\n- a\n- b",
       comments: ["A comment with > a quote and ## a header inside"],
@@ -104,7 +98,6 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
-      branch: "feature/mec-4-qux",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("`code`");

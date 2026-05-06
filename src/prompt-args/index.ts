@@ -1,20 +1,23 @@
 // Pure module: render the per-issue `promptArgs` record for a `run()` call.
 //
-// The six keys correspond to `{{KEY}}` placeholders in `.tide/prompt.md`:
-//   - ISSUE_ID:      the GitHub issue number (plain integer)
-//   - ISSUE_TITLE:   the issue's title string
-//   - ISSUE_CONTENT: a markdown block with `Title`, `Body`, and `Comments`
-//                    sub-sections (Comments omitted if there are none)
-//   - PRD_CONTENT:   the parent issue's raw markdown body
-//   - PARENT_ID:     the parent issue's number (plain integer)
-//   - BRANCH:        the Linear-derived branch name (used verbatim)
+// The five keys correspond to `{{KEY}}` placeholders in `.tide/prompt.md`:
+//   - ISSUE_ID:       the Linear identifier of the sub-issue (e.g. "ENG-7")
+//   - ISSUE_TITLE:    the issue's title string
+//   - ISSUE_CONTENT:  a markdown block with `Title`, `Body`, and `Comments`
+//                     sub-sections (Comments omitted if there are none)
+//   - PRD_CONTENT:    the parent PRD's raw markdown body
+//   - PARENT_ID:      the parent PRD's Linear identifier (e.g. "ENG-1")
+//
+// SOURCE_BRANCH and TARGET_BRANCH are NOT included: sandcastle injects them
+// as built-in prompt arguments (driven by `branch`/`baseBranch` passed to
+// `createSandbox`) and rejects any attempt to override them via promptArgs.
 //
 // Markdown special characters in body / comments pass through unmodified
 // (no escaping). An empty body still renders the `Body` sub-section with a
 // placeholder so the structure is stable across issues.
 
 export interface IssueContent {
-  number: number;
+  identifier: string;
   title: string;
   body: string;
   comments: string[];
@@ -23,12 +26,11 @@ export interface IssueContent {
 export interface BuildPromptArgsInput {
   issue: IssueContent;
   parent: IssueContent;
-  branch: string;
 }
 
 export type PromptArgsRecord = Record<string, string | number | boolean>;
 
-const EMPTY_BODY_PLACEHOLDER = "_(no body)_";
+export const EMPTY_BODY_PLACEHOLDER = "_(no body)_";
 
 function renderIssueContent(issue: IssueContent): string {
   const parts: string[] = [];
@@ -55,13 +57,12 @@ function renderIssueContent(issue: IssueContent): string {
 }
 
 export function buildPromptArgs(input: BuildPromptArgsInput): PromptArgsRecord {
-  const { issue, parent, branch } = input;
+  const { issue, parent } = input;
   return {
-    ISSUE_ID: issue.number,
+    ISSUE_ID: issue.identifier,
     ISSUE_TITLE: issue.title,
     ISSUE_CONTENT: renderIssueContent(issue),
     PRD_CONTENT: parent.body,
-    PARENT_ID: parent.number,
-    BRANCH: branch,
+    PARENT_ID: parent.identifier,
   };
 }

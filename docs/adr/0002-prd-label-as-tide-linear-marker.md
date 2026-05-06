@@ -1,5 +1,7 @@
 # PRD label as the tide↔Linear marker
 
+> Status: **superseded by ADR-0004**. Linear is now the source of truth for PRDs (not a downstream mirror of GitHub). The `PRD` label and the create-new path described below are retired; see ADR-0004 for the replacement marker scheme.
+
 Tide marks every Linear issue it tracks with a hardcoded `PRD` label, scoped to the configured Linear team, and auto-creates the label on first use if it's missing. The label — not a title prefix — is the canonical signal that an issue is tide-tracked, and it's the only filter `tide run` uses to populate the "use existing PRD" select.
 
 ## Considered

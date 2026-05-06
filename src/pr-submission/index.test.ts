@@ -6,10 +6,10 @@ import {
   runPrSubmission,
   type ShellResult,
   type ShellRunner,
-  type SandcastleRun,
 } from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
-import type { RunResult } from "@ai-hero/sandcastle";
+import type { SandboxRunOptions, SandboxRunResult } from "@ai-hero/sandcastle";
+import type { SandboxRunFn } from "../runner/index.ts";
 
 interface ShellCall {
   cmd: string;
@@ -58,13 +58,12 @@ const baseConfig: TideConfig = {
 
 const baseGhRepo = { owner: "acme", repo: "widget" };
 
-const baseSandcastleRun: SandcastleRun = () =>
+const baseSandboxRun: SandboxRunFn = () =>
   Promise.resolve({
     iterations: [],
     stdout: "",
     commits: [],
-    branch: "feature/foo",
-  } satisfies RunResult);
+  } satisfies SandboxRunResult);
 
 describe("resolveBaseBranch", () => {
   it("returns the trimmed branch name on success", async () => {
@@ -171,23 +170,23 @@ describe("runPrSubmission", () => {
       },
     ]);
 
-    let receivedRunOptions: Parameters<SandcastleRun>[0] | undefined;
-    const sandcastleRun: SandcastleRun = (opts) => {
+    let receivedRunOptions: SandboxRunOptions | undefined;
+    const sandboxRun: SandboxRunFn = (opts) => {
       receivedRunOptions = opts;
       return Promise.resolve({
         iterations: [],
         stdout: "",
         commits: [],
-        branch: "feature/per-32",
-      } satisfies RunResult);
+      } satisfies SandboxRunResult);
     };
 
     const result = await runPrSubmission({
       ghRepo: baseGhRepo,
       branch: "feature/per-32",
       baseBranch: "master",
-      parentNumber: 7,
+      parentIdentifier: "MEC-123",
       parentTitle: "PRD: example feature",
+      parentUrl: "https://linear.app/acme/issue/MEC-123",
       subIssues: [
         { number: 8, title: "Foundation tracer" },
         { number: 9, title: "Pre-flight clack confirm" },
@@ -196,7 +195,7 @@ describe("runPrSubmission", () => {
       config: baseConfig,
       sandboxEnv: {},
       shellRunner: runner,
-      sandcastleRun,
+      sandboxRun,
     });
 
     expect(result).toEqual({
@@ -209,27 +208,35 @@ describe("runPrSubmission", () => {
     expect(calls[0]?.args).toEqual(["push", "-u", "origin", "feature/per-32"]);
     expect(calls[0]?.cwd).toBe("/repo");
 
-    // The iteration was fired with the right shape.
+    // The iteration was fired with the right shape. Branch + baseBranch are
+    // bound at `createSandbox` time, not on the run-options shape, so the
+    // run options no longer carry a `branchStrategy` field.
     expect(receivedRunOptions).toBeDefined();
     if (!receivedRunOptions) throw new Error("missing run options");
     expect(receivedRunOptions.maxIterations).toBe(1);
-    expect(receivedRunOptions.branchStrategy).toEqual({
-      type: "branch",
-      branch: "feature/per-32",
-    });
+    expect(receivedRunOptions.completionSignal).toEqual([
+      "<promise>DONE</promise>",
+    ]);
     expect(typeof receivedRunOptions.prompt).toBe("string");
     expect(receivedRunOptions.promptFile).toBeUndefined();
-    // Body must close the parent PRD.
-    expect(receivedRunOptions.prompt).toContain("Closes #7");
+    // No closing magic word — neither GitHub nor Linear. The branch name
+    // alone links the PR to the Linear PRD on merge.
+    expect(receivedRunOptions.prompt).not.toContain("Closes #");
+    expect(receivedRunOptions.prompt).not.toMatch(/Fixes\s+MEC-/);
+    // Linear identifier surfaces in the body for human readers.
+    expect(receivedRunOptions.prompt).toContain("MEC-123");
     // Branch and base must be substituted.
     expect(receivedRunOptions.prompt).toContain("feature/per-32");
     expect(receivedRunOptions.prompt).toContain("master");
     // Repo identifier is injected so the agent can pass --repo correctly.
     expect(receivedRunOptions.prompt).toContain("acme/widget");
-    // PRD URL is derived host-side from owner/repo + parent number and
-    // surfaced to the agent so it can link back from the body.
+    // Linear PRD URL is threaded through verbatim from the caller.
     expect(receivedRunOptions.prompt).toContain(
-      "https://github.com/acme/widget/issues/7"
+      "https://linear.app/acme/issue/MEC-123"
+    );
+    // No GitHub-issues URL leaks into the body.
+    expect(receivedRunOptions.prompt).not.toContain(
+      "https://github.com/acme/widget/issues/"
     );
     // The bundled rich template ships all six sections plus a Conventional
     // Commits title rule.
@@ -254,10 +261,10 @@ describe("runPrSubmission", () => {
   });
 
   it("throws when git push fails — never reaches the iteration", async () => {
-    let sandcastleCalled = false;
-    const sandcastleRun: SandcastleRun = () => {
-      sandcastleCalled = true;
-      return baseSandcastleRun({} as Parameters<SandcastleRun>[0]);
+    let sandboxRunCalled = false;
+    const sandboxRun: SandboxRunFn = (opts) => {
+      sandboxRunCalled = true;
+      return baseSandboxRun(opts);
     };
 
     const { runner } = buildShellRunner([
@@ -276,19 +283,20 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentNumber: 7,
+        parentIdentifier: "MEC-123",
         parentTitle: "PRD",
+        parentUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandcastleRun,
+        sandboxRun,
       })
     );
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/git push.*failed/);
-    expect(sandcastleCalled).toBe(false);
+    expect(sandboxRunCalled).toBe(false);
   });
 
   it("throws when post-iteration gh pr list returns an empty array", async () => {
@@ -312,21 +320,22 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentNumber: 7,
+        parentIdentifier: "MEC-123",
         parentTitle: "PRD",
+        parentUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandcastleRun: baseSandcastleRun,
+        sandboxRun: baseSandboxRun,
       })
     );
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/no PR was found/);
   });
 
-  it("wraps Sandcastle thrown errors with a tide-prefixed message", async () => {
+  it("wraps sandcastle thrown errors with a tide-prefixed message", async () => {
     const { runner } = buildShellRunner([
       {
         match: (c) => c.cmd === "git" && c.args[0] === "push",
@@ -334,7 +343,7 @@ describe("runPrSubmission", () => {
       },
     ]);
 
-    const sandcastleRun: SandcastleRun = () =>
+    const sandboxRun: SandboxRunFn = () =>
       Promise.reject(new Error("sandbox failed to start"));
 
     const err = await captureError(
@@ -342,14 +351,15 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentNumber: 7,
+        parentIdentifier: "MEC-123",
         parentTitle: "PRD",
+        parentUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandcastleRun,
+        sandboxRun,
       })
     );
     expect(err).toBeInstanceOf(Error);
@@ -361,9 +371,9 @@ describe("runPrSubmission", () => {
 
 describe("buildPrPromptArgs", () => {
   const baseInput = {
-    parentNumber: 7,
+    parentIdentifier: "MEC-123",
     parentTitle: "PRD: example feature",
-    parentUrl: "https://github.com/acme/widget/issues/7",
+    parentUrl: "https://linear.app/acme/issue/MEC-123",
     branch: "feature/per-32",
     baseBranch: "master",
     repoOwner: "acme",
@@ -377,21 +387,21 @@ describe("buildPrPromptArgs", () => {
     });
     expect(Object.keys(args).sort()).toEqual(
       [
-        "BASE_BRANCH",
-        "BRANCH",
         "PARENT_ID",
         "PARENT_TITLE",
         "PARENT_URL",
         "REPO_NAME",
         "REPO_OWNER",
+        "SOURCE_BRANCH",
         "SUB_ISSUES",
+        "TARGET_BRANCH",
       ].sort()
     );
-    expect(args.PARENT_ID).toBe(7);
+    expect(args.PARENT_ID).toBe("MEC-123");
     expect(args.PARENT_TITLE).toBe("PRD: example feature");
-    expect(args.PARENT_URL).toBe("https://github.com/acme/widget/issues/7");
-    expect(args.BRANCH).toBe("feature/per-32");
-    expect(args.BASE_BRANCH).toBe("master");
+    expect(args.PARENT_URL).toBe("https://linear.app/acme/issue/MEC-123");
+    expect(args.SOURCE_BRANCH).toBe("feature/per-32");
+    expect(args.TARGET_BRANCH).toBe("master");
     expect(args.REPO_OWNER).toBe("acme");
     expect(args.REPO_NAME).toBe("widget");
   });
