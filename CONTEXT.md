@@ -1,6 +1,6 @@
 # Tide
 
-CLI that runs a queue of **agent** **iterations** against a PRD-rooted workplan, tracked in Linear, with code/PRs on GitHub. Built on **sandcastle**, which owns the **sandbox** / **host** / **iteration** primitives.
+CLI that runs a queue of **agent** **iterations** against a Linear-rooted workplan, tracked in Linear, with code/PRs on GitHub. The work-unit at the root of the queue is either a **PRD** (context-only parent whose **Sub-issues** are queued) or a **Standalone Issue** (queued directly, one iteration). Built on **sandcastle**, which owns the **sandbox** / **host** / **iteration** primitives.
 
 ## Inherited from sandcastle
 
@@ -23,26 +23,30 @@ The sandcastle-role tide hard-wires to Linear: source of the workplan, owner of 
 _Avoid_: "issue tracker" (too generic), "task source" (sandcastle's term — fine to use, but `backlog manager` is the role name).
 
 **PRD**:
-The top-level Linear issue describing a unit of work tide will run end-to-end. Marked with both `prd` and `ready-for-agent` labels. Authored by a human in Linear's UI; tide never creates one.
+A top-level Linear issue describing a body of work as **context** for its **Sub-issues**. Marked with the `prd` label. Authored by a human in Linear's UI; tide never creates one. PRDs are **never executed** by the agent — they exist solely to provide context to their **Sub-issues**' prompts.
 _Avoid_: parent issue (in the GitHub-tree sense), top-level ticket.
 
 **Sub-issue**:
-A _direct_ Linear child of a **PRD**, marked with `ready-for-agent` only (no `prd`). One unit of work the agent runs in a single iteration. Grandchildren are not flattened into the queue.
+A _direct_ Linear child of a **PRD**, marked with `ready-for-agent`. One unit of work the agent runs in a single iteration. Grandchildren are not flattened into the queue.
+
+**Standalone Issue**:
+A Linear issue marked with `ready-for-agent` and no `prd` label, with no Linear parent. One unit of work the agent runs in a single iteration. Functionally identical to a **Sub-issue**, but selected directly from the picker rather than via a **PRD**. A non-PRD issue with children is invalid (tide errors on selection).
 
 **`prd` label** (lowercase):
-The Linear-team-scoped marker that an issue is a tide-runnable **PRD**. Distinct from the older capital-`PRD` marker (see Flagged ambiguities).
+The Linear-team-scoped marker that an issue is a context-only **PRD**. Issues carrying `prd` are never executed directly by the agent; their **Sub-issues** are queued instead. Distinct from the older capital-`PRD` marker (see Flagged ambiguities).
 
 **`ready-for-agent` label**:
-The Linear-team-scoped marker that an issue is in scope for the next `tide run`. Removing it pauses an issue without losing its **PRD** identity.
+The Linear-team-scoped marker that an issue is in scope for the next `tide run` _as the agent's unit of work_. Applied to **Sub-issues** and **Standalone Issues** only — never to PRDs. Removing it pauses the issue without losing its Linear identity.
 
 **Standalone PRD**:
-A **PRD** with no `ready-for-agent` children. Tide treats the **PRD** itself as the single unit of work.
+A **PRD** with no **Sub-issues** yet — i.e., a PRD still awaiting human triage/breakdown. Not selectable in `tide run` (nothing to execute); becomes selectable once the user adds at least one `ready-for-agent` **Sub-issue** under it.
 
 ## Relationships
 
 - A **PRD** has zero or more **Sub-issues** as Linear children.
-- A **Sub-issue** belongs to exactly one **PRD**.
-- A **PRD** carries both `prd` and `ready-for-agent`; a **Sub-issue** carries only `ready-for-agent`.
+- A **Sub-issue** belongs to exactly one **PRD** (its Linear parent).
+- A **Standalone Issue** has no Linear parent and no children.
+- A **PRD** carries the `prd` label only; **Sub-issues** and **Standalone Issues** carry `ready-for-agent` (never `prd`).
 
 **DONE signal**:
 A sandcastle **completion signal** with the payload `DONE`. The **agent** emits `<promise>DONE</promise>` to declare a **Sub-issue** complete; the **host** then transitions the **Sub-issue** to Linear's _Done_ state. Overrides sandcastle's default `COMPLETE` payload.
