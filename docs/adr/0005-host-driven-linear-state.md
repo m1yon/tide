@@ -1,5 +1,7 @@
 # Host-driven Linear state transitions
 
+> Status: **partially superseded by ADR-0009** for parent (**PRD** / **Standalone Issue**) end-state handling. Linear writes are still host-driven, but the parent's terminal host-side transition is now to _In Review_ post-PR-submission, not directly to _Done_. **Sub-issue** handling under this ADR — DONE → _Done_ host-side per iteration — is unchanged.
+
 Every Linear write tide makes — workflow-state transitions, label flips, comments — is issued by the tide host process, not by the agent inside the sandbox. The sandbox stays Linear-blind: `LINEAR_API_KEY` is host-only and is not forwarded into the docker environment, in contrast with `GH_TOKEN` (per ADR-0003) which the agent does need for branch and PR work.
 
 ## Considered
