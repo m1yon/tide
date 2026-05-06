@@ -1,12 +1,15 @@
 // Pure module: render the per-issue `promptArgs` record for a `run()` call.
 //
-// The five keys correspond to `{{KEY}}` placeholders in `.tide/prompt.md`:
-//   - ISSUE_ID:       the Linear identifier of the sub-issue (e.g. "ENG-7")
+// The keys correspond to `{{KEY}}` placeholders in the prompt template:
+//   - ISSUE_ID:       the Linear identifier of the in-scope issue
 //   - ISSUE_TITLE:    the issue's title string
 //   - ISSUE_CONTENT:  a markdown block with `Title`, `Body`, and `Comments`
 //                     sub-sections (Comments omitted if there are none)
-//   - PRD_CONTENT:    the parent PRD's raw markdown body
-//   - PARENT_ID:      the parent PRD's Linear identifier (e.g. "ENG-1")
+//   - PRD_CONTENT:    the parent PRD's raw markdown body (PRD root only)
+//   - PARENT_ID:      the parent PRD's Linear identifier (PRD root only)
+//
+// `parent` is optional. When omitted (Standalone Issue root), `PRD_CONTENT`
+// and `PARENT_ID` are omitted from the rendered args.
 //
 // SOURCE_BRANCH and TARGET_BRANCH are NOT included: sandcastle injects them
 // as built-in prompt arguments (driven by `branch`/`baseBranch` passed to
@@ -25,7 +28,7 @@ export interface IssueContent {
 
 export interface BuildPromptArgsInput {
   issue: IssueContent;
-  parent: IssueContent;
+  parent?: IssueContent;
 }
 
 export type PromptArgsRecord = Record<string, string | number | boolean>;
@@ -58,11 +61,14 @@ function renderIssueContent(issue: IssueContent): string {
 
 export function buildPromptArgs(input: BuildPromptArgsInput): PromptArgsRecord {
   const { issue, parent } = input;
-  return {
+  const args: PromptArgsRecord = {
     ISSUE_ID: issue.identifier,
     ISSUE_TITLE: issue.title,
     ISSUE_CONTENT: renderIssueContent(issue),
-    PRD_CONTENT: parent.body,
-    PARENT_ID: parent.identifier,
   };
+  if (parent !== undefined) {
+    args.PRD_CONTENT = parent.body;
+    args.PARENT_ID = parent.identifier;
+  }
+  return args;
 }

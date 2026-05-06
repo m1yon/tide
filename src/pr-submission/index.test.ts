@@ -180,9 +180,9 @@ describe("runPrSubmission", () => {
       ghRepo: baseGhRepo,
       branch: "feature/per-32",
       baseBranch: "master",
-      parentIdentifier: "MEC-123",
-      parentTitle: "PRD: example feature",
-      parentUrl: "https://linear.app/acme/issue/MEC-123",
+      rootIdentifier: "MEC-123",
+      rootTitle: "PRD: example feature",
+      rootUrl: "https://linear.app/acme/issue/MEC-123",
       subIssues: [
         { number: 8, title: "Foundation tracer" },
         { number: 9, title: "Pre-flight clack confirm" },
@@ -272,9 +272,9 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentIdentifier: "MEC-123",
-        parentTitle: "PRD",
-        parentUrl: "https://linear.app/acme/issue/MEC-123",
+        rootIdentifier: "MEC-123",
+        rootTitle: "PRD",
+        rootUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
@@ -298,9 +298,9 @@ describe("runPrSubmission", () => {
         ghRepo: baseGhRepo,
         branch: "feature/per-32",
         baseBranch: "master",
-        parentIdentifier: "MEC-123",
-        parentTitle: "PRD",
-        parentUrl: "https://linear.app/acme/issue/MEC-123",
+        rootIdentifier: "MEC-123",
+        rootTitle: "PRD",
+        rootUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
         config: baseConfig,
@@ -318,9 +318,9 @@ describe("runPrSubmission", () => {
 
 describe("buildPrPromptArgs", () => {
   const baseInput = {
-    parentIdentifier: "MEC-123",
-    parentTitle: "PRD: example feature",
-    parentUrl: "https://linear.app/acme/issue/MEC-123",
+    rootIdentifier: "MEC-123",
+    rootTitle: "PRD: example feature",
+    rootUrl: "https://linear.app/acme/issue/MEC-123",
     branch: "feature/per-32",
     baseBranch: "master",
     repoOwner: "acme",
@@ -334,36 +334,38 @@ describe("buildPrPromptArgs", () => {
     });
     expect(Object.keys(args).sort()).toEqual(
       [
-        "PARENT_ID",
-        "PARENT_TITLE",
-        "PARENT_URL",
         "REPO_NAME",
         "REPO_OWNER",
+        "ROOT_ID",
+        "ROOT_TITLE",
+        "ROOT_URL",
         "SOURCE_BRANCH",
-        "SUB_ISSUES",
+        "SUB_ISSUES_BLOCK",
         "TARGET_BRANCH",
       ].sort()
     );
-    expect(args.PARENT_ID).toBe("MEC-123");
-    expect(args.PARENT_TITLE).toBe("PRD: example feature");
-    expect(args.PARENT_URL).toBe("https://linear.app/acme/issue/MEC-123");
+    expect(args.ROOT_ID).toBe("MEC-123");
+    expect(args.ROOT_TITLE).toBe("PRD: example feature");
+    expect(args.ROOT_URL).toBe("https://linear.app/acme/issue/MEC-123");
     expect(args.SOURCE_BRANCH).toBe("feature/per-32");
     expect(args.TARGET_BRANCH).toBe("master");
     expect(args.REPO_OWNER).toBe("acme");
     expect(args.REPO_NAME).toBe("widget");
   });
 
-  it("renders zero sub-issues with a stable placeholder rather than an empty list", () => {
+  it("omits the entire `Sub-issues addressed` block when subIssues is empty (Standalone Issue root)", () => {
     const args = buildPrPromptArgs({ ...baseInput, subIssues: [] });
-    expect(args.SUB_ISSUES).toBe("_(none)_");
+    expect(args.SUB_ISSUES_BLOCK).toBe("");
   });
 
-  it("renders one sub-issue as a single bullet line", () => {
+  it("renders one sub-issue under the `Sub-issues addressed` heading", () => {
     const args = buildPrPromptArgs({
       ...baseInput,
       subIssues: [{ number: 42, title: "Wire up the runner" }],
     });
-    expect(args.SUB_ISSUES).toBe("- #42 Wire up the runner");
+    expect(args.SUB_ISSUES_BLOCK).toBe(
+      "- Sub-issues addressed (in order):\n- #42 Wire up the runner"
+    );
   });
 
   it("renders many sub-issues in input order, one bullet per", () => {
@@ -375,8 +377,9 @@ describe("buildPrPromptArgs", () => {
         { number: 10, title: "Rev-list zero-commits gate" },
       ],
     });
-    expect(args.SUB_ISSUES).toBe(
+    expect(args.SUB_ISSUES_BLOCK).toBe(
       [
+        "- Sub-issues addressed (in order):",
         "- #8 Foundation tracer",
         "- #9 Pre-flight clack confirm",
         "- #10 Rev-list zero-commits gate",
@@ -387,20 +390,24 @@ describe("buildPrPromptArgs", () => {
   it("collapses newlines in user-controlled titles to spaces (escaping)", () => {
     const args = buildPrPromptArgs({
       ...baseInput,
-      parentTitle: "PRD: line one\nline two",
+      rootTitle: "PRD: line one\nline two",
       subIssues: [{ number: 100, title: "Title with\r\nembedded\rnewlines" }],
     });
-    expect(args.PARENT_TITLE).toBe("PRD: line one line two");
-    expect(args.SUB_ISSUES).toBe("- #100 Title with embedded newlines");
+    expect(args.ROOT_TITLE).toBe("PRD: line one line two");
+    expect(args.SUB_ISSUES_BLOCK).toBe(
+      "- Sub-issues addressed (in order):\n- #100 Title with embedded newlines"
+    );
   });
 
   it("trims surrounding whitespace from titles", () => {
     const args = buildPrPromptArgs({
       ...baseInput,
-      parentTitle: "  Padded PRD  ",
+      rootTitle: "  Padded PRD  ",
       subIssues: [{ number: 1, title: "  spaced  " }],
     });
-    expect(args.PARENT_TITLE).toBe("Padded PRD");
-    expect(args.SUB_ISSUES).toBe("- #1 spaced");
+    expect(args.ROOT_TITLE).toBe("Padded PRD");
+    expect(args.SUB_ISSUES_BLOCK).toBe(
+      "- Sub-issues addressed (in order):\n- #1 spaced"
+    );
   });
 });

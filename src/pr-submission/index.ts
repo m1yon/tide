@@ -52,16 +52,19 @@ export interface RunPrSubmissionOptions {
   ghRepo: GhRepo;
   branch: string;
   baseBranch: string;
-  /** Linear PRD identifier (e.g. "MEC-123"). Informational only — there is
-   * no closing magic word emitted in the PR body. The PR↔PRD link is the
-   * branch name alone. */
-  parentIdentifier: string;
-  parentTitle: string;
-  /** Linear PRD URL. Informational only — surfaces in the body so reviewers
-   * can click through. */
-  parentUrl: string;
-  // Topo-ordered sub-issues addressed by this PR. Surfaces in the rendered
-  // prompt's Context section so the agent can scope its diff summary.
+  /** Linear root identifier (a PRD identifier for PRD roots, or a
+   * Standalone Issue identifier when run from a Standalone root, e.g.
+   * "MEC-123"). Informational only — there is no closing magic word
+   * emitted in the PR body. The PR↔root link is the branch name alone. */
+  rootIdentifier: string;
+  rootTitle: string;
+  /** Linear root URL. Informational only — surfaces in the body so
+   * reviewers can click through. */
+  rootUrl: string;
+  // Topo-ordered sub-issues addressed by this PR. Empty for Standalone
+  // Issue roots (the root itself is the unit of work). Surfaces in the
+  // rendered prompt's Context section when non-empty so the agent can
+  // scope its diff summary.
   subIssues: SubIssueRef[];
   repoRoot: string;
   config: TideConfig;
@@ -180,15 +183,14 @@ export async function resolveBaseBranch(
 //
 // Single-phase: no `<sub>Files-changed:</sub>` anchor links — those would
 // require a two-phase create-then-edit flow to inject post-creation URLs.
-const PR_PROMPT_TEMPLATE = `You are submitting a pull request for parent PRD {{PARENT_ID}}: {{PARENT_TITLE}}.
+const PR_PROMPT_TEMPLATE = `You are submitting a pull request rooted at Linear issue {{ROOT_ID}}: {{ROOT_TITLE}}.
 
 The current working branch is \`{{SOURCE_BRANCH}}\` (already pushed to origin). Open a pull request against the base branch \`{{TARGET_BRANCH}}\` for the repository \`{{REPO_OWNER}}/{{REPO_NAME}}\`.
 
 # Context
 
-- Parent PRD: {{PARENT_ID}} ({{PARENT_URL}})
-- Sub-issues addressed (in order):
-{{SUB_ISSUES}}
+- Linear root: {{ROOT_ID}} ({{ROOT_URL}})
+{{SUB_ISSUES_BLOCK}}
 
 # Title
 
@@ -267,11 +269,11 @@ When the PR has been opened successfully, emit <promise>DONE</promise> and exit.
 `;
 
 export interface BuildPrPromptArgsInput {
-  /** Linear PRD identifier (e.g. "MEC-123"). */
-  parentIdentifier: string;
-  parentTitle: string;
-  /** Linear PRD URL. */
-  parentUrl: string;
+  /** Linear root identifier (e.g. "MEC-123"). */
+  rootIdentifier: string;
+  rootTitle: string;
+  /** Linear root URL. */
+  rootUrl: string;
   branch: string;
   baseBranch: string;
   repoOwner: string;
@@ -281,8 +283,6 @@ export interface BuildPrPromptArgsInput {
 
 export type PrPromptArgsRecord = Record<string, string | number>;
 
-const SUB_ISSUES_NONE = "_(none)_";
-
 // Collapse internal whitespace runs (including embedded newlines and
 // carriage returns) to a single space, then trim. Keeps user-controlled
 // titles from breaking the markdown structure of the rendered prompt.
@@ -290,11 +290,12 @@ function sanitizeInline(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function renderSubIssues(subs: readonly SubIssueRef[]): string {
-  if (subs.length === 0) return SUB_ISSUES_NONE;
-  return subs
+function renderSubIssuesBlock(subs: readonly SubIssueRef[]): string {
+  if (subs.length === 0) return "";
+  const bullets = subs
     .map((s) => `- #${String(s.number)} ${sanitizeInline(s.title)}`)
     .join("\n");
+  return `- Sub-issues addressed (in order):\n${bullets}`;
 }
 
 /**
@@ -302,20 +303,22 @@ function renderSubIssues(subs: readonly SubIssueRef[]): string {
  * template. Returns numbers as numbers and strings as strings so the
  * record matches the shape Sandcastle's `promptArgs` accepts. Titles are
  * inlined (newlines collapsed, trimmed) to keep template substitution from
- * breaking the surrounding markdown.
+ * breaking the surrounding markdown. The "Sub-issues addressed" block is
+ * rendered conditionally — present for PRD roots (non-empty subIssues),
+ * omitted for Standalone Issue roots (empty subIssues).
  */
 export function buildPrPromptArgs(
   input: BuildPrPromptArgsInput
 ): PrPromptArgsRecord {
   return {
-    PARENT_ID: input.parentIdentifier,
-    PARENT_TITLE: sanitizeInline(input.parentTitle),
-    PARENT_URL: input.parentUrl,
+    ROOT_ID: input.rootIdentifier,
+    ROOT_TITLE: sanitizeInline(input.rootTitle),
+    ROOT_URL: input.rootUrl,
     SOURCE_BRANCH: input.branch,
     TARGET_BRANCH: input.baseBranch,
     REPO_OWNER: input.repoOwner,
     REPO_NAME: input.repoName,
-    SUB_ISSUES: renderSubIssues(input.subIssues),
+    SUB_ISSUES_BLOCK: renderSubIssuesBlock(input.subIssues),
   };
 }
 
@@ -382,9 +385,9 @@ export async function runPrSubmission(
     ghRepo,
     branch,
     baseBranch,
-    parentIdentifier,
-    parentTitle,
-    parentUrl,
+    rootIdentifier,
+    rootTitle,
+    rootUrl,
     subIssues,
     repoRoot,
     config,
@@ -398,9 +401,9 @@ export async function runPrSubmission(
   // ships in tide source and is not user-editable. Uses the reusable-sandbox
   // pattern (`createSandbox` + `sandbox.run`) to match the runner's API.
   const promptArgs = buildPrPromptArgs({
-    parentIdentifier,
-    parentTitle,
-    parentUrl,
+    rootIdentifier,
+    rootTitle,
+    rootUrl,
     branch,
     baseBranch,
     repoOwner: ghRepo.owner,

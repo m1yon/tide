@@ -10,19 +10,29 @@
 // does not tail the log to stdout. The user inspects the .tide/logs file
 // after the run, or tails it themselves in a second terminal.
 //
-// For each Linear sub-issue in topo order:
-//   1. Fetch its body+comments (and the PRD's body once at the top) from
-//      Linear.
-//   2. Transition the sub-issue to *In Progress* in Linear.
+// The runner supports two root kinds via the `root` tagged union:
+//   - `kind: "prd"` — the queue iterates over a PRD's `ready-for-agent`
+//     sub-issues. The PRD's body is fetched once at the top and threaded
+//     through every iteration's prompt args (PRD_CONTENT / PARENT_ID).
+//     The PRD-rooted prompt template at `.tide/prompt.md` is used.
+//   - `kind: "standalone"` — the queue is a single Standalone Issue. No
+//     parent fetch happens; the iteration's prompt args omit the parent
+//     keys. The Standalone-Issue template at `.tide/prompt-standalone.md`
+//     is used.
+//
+// For each in-scope Linear issue in topo order:
+//   1. Fetch its body+comments (and the PRD's body once at the top, for
+//      PRD roots only) from Linear.
+//   2. Transition the issue to *In Progress* in Linear.
 //   3. Build promptArgs via the pure `buildPromptArgs` helper and call
-//      `sandbox.run(...)` with the working-agent prompt template.
+//      `sandbox.run(...)` with the appropriate prompt template.
 //   4. Dispatch on the iteration's outcome:
-//        - DONE + commits → host transitions the sub-issue to *Done*; queue
+//        - DONE + commits → host transitions the issue to *Done*; queue
 //          continues.
 //        - BLOCKED / agent-FAIL → run the summarizer agent in the same
 //          sandbox, extract its final assistant message via the
 //          `transcript-extract` module, post it as a Linear comment, then
-//          flip the sub-issue's label from `ready-for-agent` to
+//          flip the issue's label from `ready-for-agent` to
 //          `ready-for-human` and continue. If the summarizer itself fails
 //          (transcript unparseable, sandbox throws), tide falls back to a
 //          short placeholder comment that cites the underlying error.
@@ -87,6 +97,15 @@ export interface OrderedIssue {
 }
 
 /**
+ * Tagged-union descriptor of the root the runner is iterating under. PRD
+ * roots have an associated parent issue whose body hydrates every
+ * iteration's prompt args; Standalone roots have no parent.
+ */
+export type RunRoot =
+  | { kind: "prd"; id: string; identifier: string }
+  | { kind: "standalone" };
+
+/**
  * Test seam type: a function with the same shape as `sandbox.run(...)` from
  * `@ai-hero/sandcastle`. Tests pass a stub; production wires
  * `sandbox.run.bind(sandbox)` of a real `Sandbox` created by
@@ -138,10 +157,10 @@ async function defaultShellRunner(
 }
 
 export interface RunIssueQueueOptions {
-  /** PRD identifier (e.g. "ENG-1") — surfaced in prompt args as PARENT_ID. */
-  parentIdentifier: string;
-  /** PRD UUID — used to fetch the PRD body once for PRD_CONTENT. */
-  parentId: string;
+  /** Tagged-union root reference. PRD roots fetch the parent body once for
+   * PRD_CONTENT / PARENT_ID; Standalone roots skip the parent fetch and
+   * omit the parent keys from prompt args. */
+  root: RunRoot;
   orderedIssues: OrderedIssue[];
   /** Feature branch the agent commits to. Surfaced as BRANCH in prompt args. */
   branch: string;
@@ -290,12 +309,16 @@ function buildFallbackComment(
  * Run the summarizer agent inside the same sandbox, read its final
  * assistant message back from its log file, and return the comment body.
  * Throws on any failure; the caller falls back to a placeholder comment.
+ *
+ * For Standalone Issue roots there is no parent PRD; `parentContent` /
+ * `parentIdentifier` are undefined and the rendered prompt's parent fields
+ * fall through to empty placeholders.
  */
 async function runSummarizer(args: {
   kind: SummarizerPromptKind;
   workingAgentLogFilePath: string | undefined;
-  parentContent: LinearIssueContent;
-  parentIdentifier: string;
+  parentContent: LinearIssueContent | undefined;
+  parentIdentifier: string | undefined;
   issueContent: LinearIssueContent;
   sandboxRun: SandboxRunFn;
   readFinalAssistantMessage: (logFilePath: string) => Promise<string>;
@@ -312,9 +335,9 @@ async function runSummarizer(args: {
     issueIdentifier: args.issueContent.identifier,
     issueTitle: args.issueContent.title,
     issueBody: args.issueContent.body,
-    parentIdentifier: args.parentIdentifier,
-    parentTitle: args.parentContent.title,
-    parentBody: args.parentContent.body,
+    parentIdentifier: args.parentIdentifier ?? "",
+    parentTitle: args.parentContent?.title ?? "",
+    parentBody: args.parentContent?.body ?? "",
     transcript,
   });
 
@@ -392,8 +415,7 @@ export async function runIssueQueue(
   options: RunIssueQueueOptions
 ): Promise<RunIssueQueueResult> {
   const {
-    parentIdentifier,
-    parentId,
+    root,
     orderedIssues,
     branch,
     baseBranch,
@@ -416,14 +438,22 @@ export async function runIssueQueue(
   const createSandboxFn = options.createSandbox ?? defaultCreateSandbox;
   const shellRunner = options.shellRunner ?? defaultShellRunner;
 
-  // Fetch the parent body once for PRD_CONTENT — it's stable across the loop.
-  const parentContent = await fetchIssueContentFn(linearCtx, parentId);
+  // PRD root: fetch the parent body once for PRD_CONTENT — it's stable
+  // across the loop. Standalone root: no parent to fetch.
+  const parentContent: LinearIssueContent | undefined =
+    root.kind === "prd"
+      ? await fetchIssueContentFn(linearCtx, root.id)
+      : undefined;
 
-  // The prompt template lives in the host repo at .tide/prompt.md. The
-  // sandcastle SDK resolves promptFile against process.cwd() (per its docs),
-  // so we pass an absolute path to avoid ambiguity when the user invokes
-  // `tide run` from a subdirectory.
-  const promptFile = path.join(repoRoot, ".tide", "prompt.md");
+  // The prompt template lives in the host repo at .tide/. The PRD-rooted
+  // template is the long-standing `prompt.md`; the Standalone-Issue
+  // template `prompt-standalone.md` drops the "Parent PRD" section. The
+  // sandcastle SDK resolves promptFile against process.cwd() (per its
+  // docs), so we pass an absolute path to avoid ambiguity when the user
+  // invokes `tide run` from a subdirectory.
+  const promptFileName =
+    root.kind === "prd" ? "prompt.md" : "prompt-standalone.md";
+  const promptFile = path.join(repoRoot, ".tide", promptFileName);
 
   // Either use the test-supplied sandboxRun seam, or eagerly create one
   // sandbox for the entire queue. The reusable-sandbox shape lets us share
@@ -495,7 +525,10 @@ export async function runIssueQueue(
 
       const promptArgs = buildPromptArgs({
         issue: issueContent,
-        parent: { ...parentContent, identifier: parentIdentifier },
+        parent:
+          root.kind === "prd" && parentContent !== undefined
+            ? { ...parentContent, identifier: root.identifier }
+            : undefined,
       });
 
       const workingLogPath = buildLogPath({
@@ -576,7 +609,7 @@ export async function runIssueQueue(
             kind: summarizerKind,
             workingAgentLogFilePath: result.logFilePath,
             parentContent,
-            parentIdentifier,
+            parentIdentifier: root.kind === "prd" ? root.identifier : undefined,
             issueContent,
             sandboxRun,
             readFinalAssistantMessage,

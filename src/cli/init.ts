@@ -8,6 +8,7 @@ import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import configTsRaw from "./init-templates/config.ts" with { type: "text" };
 import dockerfile from "./init-templates/Dockerfile" with { type: "text" };
 import promptMd from "./init-templates/prompt.md" with { type: "text" };
+import promptStandaloneMd from "./init-templates/prompt-standalone.md" with { type: "text" };
 import envExample from "./init-templates/.env.example" with { type: "text" };
 import gitignore from "./init-templates/.gitignore" with { type: "text" };
 
@@ -21,6 +22,7 @@ const TARGETS = [
   { name: "config.ts", content: configTs },
   { name: "Dockerfile", content: dockerfile },
   { name: "prompt.md", content: promptMd },
+  { name: "prompt-standalone.md", content: promptStandaloneMd },
   { name: ".env.example", content: envExample },
   { name: ".gitignore", content: gitignore },
 ] as const;

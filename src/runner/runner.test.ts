@@ -87,8 +87,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -134,8 +133,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     let runCount = 0;
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
         makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
         makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
@@ -241,8 +239,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     let runCount = 0;
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
         makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
         makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
@@ -339,8 +336,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     let capturedSignal: string | string[] | undefined;
 
     await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -374,8 +370,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -438,8 +433,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -501,8 +495,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     let runCount = 0;
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -551,8 +544,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     let runCount = 0;
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -602,8 +594,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
         makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
         makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
@@ -662,8 +653,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -693,8 +683,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const events: string[] = [];
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
         makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
         makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
@@ -741,8 +730,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const doneCalls: string[] = [];
 
     await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered({ id: "uuid-eng-1" })],
       branch: "feature/eng",
       baseBranch: "master",
@@ -772,8 +760,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     let capturedOpts: SandboxRunOptions | undefined;
 
     await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered({ id: "uuid-eng-7", identifier: "ENG-7" })],
       branch: "user/feature/eng-7",
       baseBranch: "main",
@@ -812,8 +799,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     let capturedOpts: SandboxRunOptions | undefined;
 
     await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -844,8 +830,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     let runCount = 0;
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng",
       baseBranch: "master",
@@ -902,8 +887,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     const { runner, calls } = recordingShellRunner();
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -929,8 +913,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     const { runner, calls } = recordingShellRunner();
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -977,8 +960,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     const { runner, calls } = recordingShellRunner();
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
       branch: "feature/eng-1",
       baseBranch: "master",
@@ -1013,8 +995,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     });
 
     const result = await runIssueQueue({
-      parentIdentifier: "ENG-100",
-      parentId: "uuid-prd",
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
         makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
         makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
