@@ -641,24 +641,26 @@ export async function runQueueAfterPick(
     log.success(tail.outcome.url);
   }
 
-  // Post-submission *In Review* hand-off (PRD roots only). Fires when the
-  // queue ran cleanly (every queued sub-issue completed, none flipped) AND
-  // the PR was opened. Any other combination skips with a warning so the
-  // user knows to transition the PRD manually. Transition failure preserves
-  // the PR and the queue's existing Linear writes — the failure surfaces as
-  // a warning, not a non-zero exit.
-  if (opts.picked.kind === "prd" && tail.outcome.kind === "opened") {
+  // Post-submission *In Review* hand-off. Fires when the queue ran cleanly
+  // (every queued unit completed, none flipped) AND the PR was opened. Any
+  // other combination skips: PRD roots get an explicit "not transitioned"
+  // warning; Standalone Issue roots fall through to the existing BLOCKED
+  // warning below. Transition failure preserves the PR and the queue's
+  // existing Linear writes — the failure surfaces as a warning, not a
+  // non-zero exit.
+  if (tail.outcome.kind === "opened") {
     const queueClean = queueResult.completed > 0 && queueResult.flipped === 0;
+    const rootLabel = opts.picked.kind === "prd" ? "PRD" : "Issue";
     if (queueClean) {
       try {
         await transitionRootToInReviewFn(opts.linearCtx, root.id);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.warn(
-          `Failed to transition PRD ${root.identifier} to In Review: ${msg}. PR was opened; transition the PRD manually in Linear.`
+          `Failed to transition ${rootLabel} ${root.identifier} to In Review: ${msg}. PR was opened; transition manually in Linear.`
         );
       }
-    } else {
+    } else if (opts.picked.kind === "prd") {
       log.warn(
         `PRD ${root.identifier} not transitioned to In Review — queue had flipped or incomplete sub-issues. Transition manually in Linear if appropriate.`
       );

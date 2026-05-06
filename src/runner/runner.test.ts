@@ -1042,3 +1042,136 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     ]);
   });
 });
+
+describe("runIssueQueue — Standalone Issue root: skip Done transition", () => {
+  test("standalone DONE + commits → does NOT call transitionToDone; counts as completed", async () => {
+    const events: string[] = [];
+
+    const result = await runIssueQueue({
+      root: { kind: "standalone" },
+      orderedIssues: [makeOrdered({ id: "uuid-iss-7", identifier: "ENG-7" })],
+      branch: "feature/eng-7",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => {
+        events.push("fetchContent");
+        return Promise.resolve(makeIssueContent({ identifier: "ENG-7" }));
+      },
+      transitionToInProgress: (_ctx, issueId) => {
+        events.push(`inProgress:${issueId}`);
+        return Promise.resolve();
+      },
+      transitionToDone: (_ctx, issueId) => {
+        events.push(`done:${issueId}`);
+        return Promise.resolve();
+      },
+      sandboxRun: () => {
+        events.push("run");
+        return Promise.resolve(makeSandboxRunResult());
+      },
+    });
+
+    // Iteration counted as completed (clean DONE + commits) but no host-side
+    // Done transition fired — the post-submission hook handles In Review.
+    expect(result.completed).toBe(1);
+    expect(result.flipped).toBe(0);
+    expect(result.abortedAt).toBeUndefined();
+    expect(events).toEqual([
+      "fetchContent", // issue body (no parent fetch for standalone)
+      "inProgress:uuid-iss-7",
+      "run",
+    ]);
+    expect(events).not.toContain("done:uuid-iss-7");
+  });
+
+  test("standalone BLOCKED iteration: existing flip + comment path is preserved (no Done transition either)", async () => {
+    const events: string[] = [];
+    let runCount = 0;
+
+    const result = await runIssueQueue({
+      root: { kind: "standalone" },
+      orderedIssues: [makeOrdered({ id: "uuid-iss-7", identifier: "ENG-7" })],
+      branch: "feature/eng-7",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: (_ctx, issueId) => {
+        events.push(`inProgress:${issueId}`);
+        return Promise.resolve();
+      },
+      transitionToDone: (_ctx, issueId) => {
+        events.push(`done:${issueId}`);
+        return Promise.resolve();
+      },
+      flipLabelToReadyForHuman: (_ctx, issueId) => {
+        events.push(`flip:${issueId}`);
+        return Promise.resolve();
+      },
+      postComment: (_ctx, issueId) => {
+        events.push(`comment:${issueId}`);
+        return Promise.resolve();
+      },
+      sandboxRun: () => {
+        runCount += 1;
+        if (runCount === 1) {
+          return Promise.resolve(
+            makeSandboxRunResult({
+              commits: [],
+              completionSignal: BLOCKED_SIGNAL,
+              logFilePath: "/tmp/standalone-working.log",
+            })
+          );
+        }
+        return Promise.resolve(
+          makeSandboxRunResult({
+            commits: [],
+            completionSignal: undefined,
+            logFilePath: "/tmp/standalone-summarizer.log",
+          })
+        );
+      },
+      readFinalAssistantMessage: () => Promise.resolve("summary"),
+    });
+
+    expect(result.completed).toBe(0);
+    expect(result.flipped).toBe(1);
+    expect(result.abortedAt).toBeUndefined();
+    expect(events).toContain("flip:uuid-iss-7");
+    expect(events).toContain("comment:uuid-iss-7");
+    // The BLOCKED path never calls Done, even for sub-issues. This pins that
+    // the standalone gate doesn't accidentally widen to flip-Done.
+    expect(events).not.toContain("done:uuid-iss-7");
+  });
+
+  test("PRD root: sub-issue DONE + commits → still calls transitionToDone (regression guard)", async () => {
+    const doneCalls: string[] = [];
+
+    await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [makeOrdered({ id: "uuid-sub-1", identifier: "ENG-1" })],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: (_ctx, issueId) => {
+        doneCalls.push(issueId);
+        return Promise.resolve();
+      },
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    // Sub-issues continue to transition to Done host-side (real-time
+    // per-iteration progress, ADR-0005).
+    expect(doneCalls).toEqual(["uuid-sub-1"]);
+  });
+});

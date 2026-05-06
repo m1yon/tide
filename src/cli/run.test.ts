@@ -2182,3 +2182,205 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     expect(out).toContain("Linear API timeout");
   });
 });
+
+describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue root)", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  function openedTail(): Promise<PrTailStepResult> {
+    return Promise.resolve({
+      outcome: { kind: "opened", url: "https://example/pr/1" },
+      outroMessage: "Done. PR opened: https://example/pr/1",
+      exitCode: 0,
+    } satisfies PrTailStepResult);
+  }
+
+  function optedOutTail(): Promise<PrTailStepResult> {
+    return Promise.resolve({
+      outcome: { kind: "opted-out" },
+      outroMessage: "Done. PR step skipped (you opted out at pre-flight).",
+      exitCode: 0,
+    } satisfies PrTailStepResult);
+  }
+
+  test("clean iteration + PR opened → transitions the Standalone Issue to In Review", async () => {
+    const issue = makeStandaloneIssue({
+      id: "uuid-iss-7",
+      identifier: "ENG-7",
+    });
+    const calls: { ctx: LinearContext; issueId: string }[] = [];
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: (ctx, issueId) => {
+        calls.push({ ctx, issueId });
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      { ctx: { apiKey: "lk", teamKey: "ENG" }, issueId: "uuid-iss-7" },
+    ]);
+  });
+
+  test("clean iteration + no PR opened → does NOT transition; existing no-merge warning still fires", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: optedOutTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Issue ENG-7 will not auto-transition");
+  });
+
+  test("dirty iteration (flipped > 0) + PR opened → does NOT transition", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    // The existing standalone BLOCKED warning communicates the skip; no
+    // new "not transitioned" warning is required for this cell.
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Issue ENG-7 is flipped to `ready-for-human`");
+  });
+
+  test("dirty iteration + no PR → does NOT transition", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: optedOutTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Issue ENG-7 is flipped to `ready-for-human`");
+    expect(out).toContain("Issue ENG-7 will not auto-transition");
+  });
+
+  test("In Review transition failure preserves the PR and earlier Linear writes; warning surfaces in summary", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () =>
+        Promise.reject(new Error("Linear API timeout")),
+    });
+
+    // PR was opened — exit code stays 0 even though the In Review
+    // transition failed afterwards.
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    // PR URL still surfaced (PR not unwound).
+    expect(out).toContain("https://example/pr/1");
+    // Failure surfaces in the run output, citing both the issue identifier
+    // and the In Review transition.
+    expect(out).toContain("ENG-7");
+    expect(out).toContain("In Review");
+    expect(out).toContain("Linear API timeout");
+  });
+});
