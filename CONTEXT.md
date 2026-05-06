@@ -18,6 +18,10 @@ These terms come from [sandcastle's CONTEXT.md](https://github.com/ai-hero/sandc
 
 ## Language
 
+**Backlog manager (Linear)**:
+The sandcastle-role tide hard-wires to Linear: source of the workplan, owner of unit-of-work identity (**PRD** + **Sub-issue**), keeper of the state machine (workflow states + label vocabulary). Not pluggable in tide — swapping it for another tracker would require code, not config. Source-of-truth-ness is captured in ADR 0004; the host-driven state writes are ADR 0005.
+_Avoid_: "issue tracker" (too generic), "task source" (sandcastle's term — fine to use, but `backlog manager` is the role name).
+
 **PRD**:
 The top-level Linear issue describing a unit of work tide will run end-to-end. Marked with both `prd` and `ready-for-agent` labels. Authored by a human in Linear's UI; tide never creates one.
 _Avoid_: parent issue (in the GitHub-tree sense), top-level ticket.
@@ -56,7 +60,7 @@ The primary role tide plays the **agent** in: doing the engineering work for one
 A second **agent** invocation, with its own prompt, that runs after a BLOCKED or agent-driven FAIL exit. Runs in the _same_ **reusable sandbox** as the **working agent** (via `createSandbox` + multiple `sandbox.run(...)` calls). Receives the **working agent**'s transcript plus the **Sub-issue** and **PRD** Linear bodies as prompt context. Its concise final assistant message becomes a Linear comment on the **Sub-issue**. Different prompt per trigger (`blocked-summary` vs `fail-summary`).
 
 **Reusable sandbox**:
-A single docker container, created once at the start of `tide run` via sandcastle's `createSandbox`, and reused across every working-agent iteration _and_ every summarizer invocation in the queue. Replaces today's pattern of one fresh container per `run()` call.
+The single **sandbox** tide creates once per `tide run` and reuses across every **working agent** **iteration** and every **summarizer agent** invocation, via `createSandbox` + repeated `sandbox.run(...)`. The "shared across iterations" choice (vs sandcastle's per-`run()` default) is what the term names; see ADR 0005.
 
 **Commit reference**:
 Every commit the agent makes on the feature branch is prefixed with the non-closing Linear magic word `ref <linear-id>` (e.g. `ref MEC-123`). This links the commit to the **Sub-issue** in Linear's UI without transitioning state.
@@ -72,3 +76,4 @@ The feature branch's name comes verbatim from the **PRD**'s Linear-auto-generate
 - Old `PRD` label (capital, per ADR 0002) meant "tide-created mirror of a GitHub parent". New `prd` (lowercase) means "user-declared tide-runnable PRD". Different semantics — ADR 0002 will be superseded.
 - Sandcastle's default **completion signal** payload is `COMPLETE` (single binary). Tide replaces it with two payloads — `DONE` (success) and `BLOCKED` (graceful abort) — riding the same `<promise>…</promise>` mechanism. Reading sandcastle docs, "completion" maps to either of tide's signals.
 - Branch placeholders in prompts use sandcastle's built-in names `{{SOURCE_BRANCH}}` / `{{TARGET_BRANCH}}`, not legacy `{{BRANCH}}` / `{{BASE_BRANCH}}`. Sandcastle injects them automatically from the `branch` / `baseBranch` passed to `createSandbox`, and rejects any attempt to override them via `promptArgs`. Old user prompts referencing `{{BRANCH}}` will fail to substitute after upgrade.
+- `.tide/` is tide's **config directory** (sandcastle's term). Sandcastle hardcodes `.sandcastle/` for its own worktrees + logs; tide bridges with a runtime symlink (`.sandcastle` → `.tide`) so both land in the same place. Plan: move everything under `.tide/` and drop the symlink once sandcastle exposes a config-directory override.
