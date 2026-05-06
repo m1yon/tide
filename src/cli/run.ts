@@ -501,9 +501,27 @@ export async function runQueueAfterPick(
       }
     }
   } else {
-    // Standalone Issue root: validate the no-children contract before any
-    // Linear write. Misconfigured "ready-for-agent" issues with sub-tasks
-    // get a teaching-moment error instead of a silent half-run.
+    // Standalone Issue root: build a one-element queue. The no-children
+    // contract is validated post-confirm (below) so that a user who cancels
+    // out of the pre-flight does not see a structural error message.
+    orderedIssues = [
+      { id: root.id, identifier: root.identifier, title: root.title },
+    ];
+    log.info(`Branch: ${root.branchName}`);
+    log.info(`Standalone Issue: 1 iteration on ${root.identifier}.`);
+  }
+
+  const proceed = await confirmRunFn(orderedIssues.length, root.branchName);
+  if (!proceed) {
+    cancel("Cancelled before any run() invocation.");
+    return 0;
+  }
+
+  // Standalone Issue contract: no Linear children. Validated only after the
+  // user has confirmed the pre-flight, so a cancel at the confirm prompt
+  // does not surface this structural error. No Linear writes have happened
+  // yet, so the abort path stays clean.
+  if (opts.picked.kind === "standalone") {
     const childSpin = spinner();
     childSpin.start("Verifying Standalone Issue has no Linear children");
     let children: SubIssue[];
@@ -525,18 +543,6 @@ export async function runQueueAfterPick(
       outro("Aborted.");
       return 1;
     }
-
-    orderedIssues = [
-      { id: root.id, identifier: root.identifier, title: root.title },
-    ];
-    log.info(`Branch: ${root.branchName}`);
-    log.info(`Standalone Issue: 1 iteration on ${root.identifier}.`);
-  }
-
-  const proceed = await confirmRunFn(orderedIssues.length, root.branchName);
-  if (!proceed) {
-    cancel("Cancelled before any run() invocation.");
-    return 0;
   }
 
   const prCreationConfirmed = await confirmPrFn();

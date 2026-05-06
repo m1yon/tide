@@ -1681,6 +1681,64 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     expect(out).toContain("non-PRD with children");
   });
 
+  test("does not surface the children-error when the user cancels at the pre-flight (standalone with children)", async () => {
+    // PER-56 acceptance: the children-check happens AFTER the user confirms
+    // the pre-flight. Cancelling the run at the confirm prompt — even when
+    // the picked Standalone Issue would otherwise fail validation — must
+    // exit cleanly with no structural error message.
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let fetchSubIssuesCalls = 0;
+    let runIssueQueueCalls = 0;
+    let transitionCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchSubIssuesCalls += 1;
+        return Promise.resolve([
+          {
+            id: "uuid-child",
+            identifier: "ENG-77",
+            title: "Sub-task",
+            state: "Backlog",
+            stateType: "backlog",
+            labels: [],
+            blockedBy: [],
+          },
+        ] as SubIssue[]);
+      },
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0, flipped: 0 });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(false),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => {
+        transitionCalls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(fetchSubIssuesCalls).toBe(0);
+    expect(runIssueQueueCalls).toBe(0);
+    expect(transitionCalls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).not.toContain("non-PRD with children");
+  });
+
   test("logs the BLOCKED warning when the standalone iteration ends on a flip (no completion)", async () => {
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
 
