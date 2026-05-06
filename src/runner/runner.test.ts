@@ -17,9 +17,28 @@ import {
   DONE_SIGNAL,
   runIssueQueue,
   type OrderedIssue,
+  type ShellResult,
+  type ShellRunner,
 } from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { LinearContext, LinearIssueContent } from "../linear/index.ts";
+
+interface ShellCall {
+  cmd: string;
+  args: readonly string[];
+  cwd: string;
+}
+
+function recordingShellRunner(
+  result: ShellResult = { exitCode: 0, stdout: "", stderr: "" }
+): { runner: ShellRunner; calls: ShellCall[] } {
+  const calls: ShellCall[] = [];
+  const runner: ShellRunner = (cmd, args, cwd) => {
+    calls.push({ cmd, args: [...args], cwd });
+    return Promise.resolve(result);
+  };
+  return { runner, calls };
+}
 
 const baseConfig: TideConfig = {
   linear: { team: "ENG" },
@@ -875,5 +894,170 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     expect(doneCalls).toBe(0);
     expect(flipCalls).toBe(1);
     expect(result.flipped).toBe(1);
+  });
+});
+
+describe("runIssueQueue — host-side `git push` after every iteration", () => {
+  test("after a working-agent iteration with ≥1 commit, fires `git push -u origin <branch>` on the host", async () => {
+    const { runner, calls } = recordingShellRunner();
+
+    const result = await runIssueQueue({
+      parentIdentifier: "ENG-100",
+      parentId: "uuid-prd",
+      orderedIssues: [makeOrdered()],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      shellRunner: runner,
+    });
+
+    expect(result.completed).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.cmd).toBe("git");
+    expect(calls[0]?.args).toEqual(["push", "-u", "origin", "feature/eng-1"]);
+    expect(calls[0]?.cwd).toBe("/repo");
+  });
+
+  test("an iteration whose result has zero commits does not fire a push", async () => {
+    const { runner, calls } = recordingShellRunner();
+
+    const result = await runIssueQueue({
+      parentIdentifier: "ENG-100",
+      parentId: "uuid-prd",
+      orderedIssues: [makeOrdered()],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      flipLabelToReadyForHuman: () => Promise.resolve(),
+      postComment: () => Promise.resolve(),
+      sandboxRun: (opts: SandboxRunOptions) => {
+        // Working-agent iteration: zero commits, no signal → agent-FAIL.
+        // Summarizer iteration: also zero commits.
+        if (opts.name === "tide") {
+          return Promise.resolve(
+            makeSandboxRunResult({
+              commits: [],
+              completionSignal: undefined,
+              logFilePath: "/tmp/working.log",
+            })
+          );
+        }
+        return Promise.resolve(
+          makeSandboxRunResult({
+            commits: [],
+            completionSignal: undefined,
+            logFilePath: "/tmp/summarizer.log",
+          })
+        );
+      },
+      readFinalAssistantMessage: () => Promise.resolve("summary"),
+      shellRunner: runner,
+    });
+
+    expect(result.flipped).toBe(1);
+    // No `git push` call fired — the working-agent iteration's commit list
+    // was empty.
+    expect(calls.filter((c) => c.cmd === "git")).toHaveLength(0);
+  });
+
+  test("when sandbox.run throws, the catch path attempts `git push` before returning the infra-abort", async () => {
+    const { runner, calls } = recordingShellRunner();
+
+    const result = await runIssueQueue({
+      parentIdentifier: "ENG-100",
+      parentId: "uuid-prd",
+      orderedIssues: [makeOrdered()],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandboxRun: () => Promise.reject(new Error("sandcastle ran out of disk")),
+      shellRunner: runner,
+    });
+
+    // Queue aborts as infra-fail …
+    expect(result.completed).toBe(0);
+    expect(result.abortedAt?.reason).toContain("ran out of disk");
+    // … but not before the push attempt. The agent may have committed
+    // before the throw; pushing salvages that work even when the
+    // SandboxRunResult is unavailable.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.cmd).toBe("git");
+    expect(calls[0]?.args).toEqual(["push", "-u", "origin", "feature/eng-1"]);
+  });
+
+  test("when `git push` exits non-zero, the runner warns and continues — no abort, no Linear mutation, no flip", async () => {
+    const events: string[] = [];
+    const { runner, calls } = recordingShellRunner({
+      exitCode: 1,
+      stdout: "",
+      stderr: "remote: temporary network blip",
+    });
+
+    const result = await runIssueQueue({
+      parentIdentifier: "ENG-100",
+      parentId: "uuid-prd",
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: (_ctx, issueId) => {
+        events.push(`inProgress:${issueId}`);
+        return Promise.resolve();
+      },
+      transitionToDone: (_ctx, issueId) => {
+        events.push(`done:${issueId}`);
+        return Promise.resolve();
+      },
+      flipLabelToReadyForHuman: (_ctx, issueId) => {
+        events.push(`flip:${issueId}`);
+        return Promise.resolve();
+      },
+      postComment: (_ctx, issueId) => {
+        events.push(`comment:${issueId}`);
+        return Promise.resolve();
+      },
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      shellRunner: runner,
+    });
+
+    // Both sub-issues completed despite the per-iteration push failures.
+    // No abort, no flips, every Done transition fired.
+    expect(result.completed).toBe(2);
+    expect(result.flipped).toBe(0);
+    expect(result.abortedAt).toBeUndefined();
+    // Each iteration tried to push.
+    expect(calls.filter((c) => c.cmd === "git")).toHaveLength(2);
+    expect(events).toEqual([
+      "inProgress:uuid-1",
+      "done:uuid-1",
+      "inProgress:uuid-2",
+      "done:uuid-2",
+    ]);
   });
 });

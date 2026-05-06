@@ -1,10 +1,13 @@
 // PR submission tail-step for `tide run`.
 //
-// After `runIssueQueue` succeeds, `tideRun` calls `runPrSubmission` to push
-// the feature branch host-side and fire a single Sandcastle iteration whose
-// only job is to open a PR via `gh pr create`. Success is verified host-side
-// via `gh pr list --head <branch>` (the iteration produces no commit, so the
-// runner's commit-based isFailedRun heuristic is not reused).
+// After `runIssueQueue` succeeds, `tideRun` calls `runPrSubmission` to fire
+// a single Sandcastle iteration whose only job is to open a PR via `gh pr
+// create`. Success is verified host-side via `gh pr list --head <branch>`
+// (the iteration produces no commit, so the runner's commit-based
+// isFailedRun heuristic is not reused). The host-side `git push` previously
+// performed here has moved to `runIssueQueue`, which pushes after every
+// working-agent iteration (see ADR-0007); by the time this runs, every
+// commit on the feature branch is already on origin.
 //
 // The bundled prompt template is interface-emphasizing (Ousterhout: the
 // change callers see is the change that matters) and ships as a TypeScript
@@ -16,7 +19,6 @@
 // existing PR) is out of scope for this slice.
 
 import { spawn } from "node:child_process";
-import { log } from "@clack/prompts";
 import {
   createSandbox as defaultCreateSandbox,
   claudeCode,
@@ -367,10 +369,11 @@ function parsePrList(stdout: string): PrListItem[] {
 }
 
 /**
- * Push the branch to origin, fire a single Sandcastle iteration whose only
- * job is to open the PR via `gh pr create`, and verify the result by listing
- * PRs for the branch on the host. Throws on push failure, iteration error,
- * or empty post-iteration PR list.
+ * Fire a single Sandcastle iteration whose only job is to open the PR via
+ * `gh pr create`, and verify the result by listing PRs for the branch on
+ * the host. The branch is already on origin by the time this runs — the
+ * runner pushes after every iteration per ADR-0007. Throws on iteration
+ * error or empty post-iteration PR list.
  */
 export async function runPrSubmission(
   options: RunPrSubmissionOptions
@@ -390,23 +393,7 @@ export async function runPrSubmission(
   } = options;
   const createSandboxFn = options.createSandbox ?? defaultCreateSandbox;
 
-  // Step 1: push the branch to origin host-side. Surfacing push errors here
-  // (rather than wrapping them inside an LLM iteration failure) keeps the
-  // failure mode legible.
-  log.info(`Pushing ${branch} to origin`);
-  const pushResult = await shellRunner(
-    "git",
-    ["push", "-u", "origin", branch],
-    repoRoot
-  );
-  if (pushResult.exitCode !== 0) {
-    const stderr = pushResult.stderr.trim();
-    throw new Error(
-      `tide: \`git push -u origin ${branch}\` failed (exit ${String(pushResult.exitCode)})${stderr === "" ? "" : `: ${stderr}`}`
-    );
-  }
-
-  // Step 2: fire the sandcastle iteration with the bundled, interface-
+  // Step 1: fire the sandcastle iteration with the bundled, interface-
   // emphasizing prompt. Inline `prompt` (not `promptFile`) — the template
   // ships in tide source and is not user-editable. Uses the reusable-sandbox
   // pattern (`createSandbox` + `sandbox.run`) to match the runner's API.
@@ -473,7 +460,7 @@ export async function runPrSubmission(
     }
   }
 
-  // Step 3: verify host-side that a PR now exists for the branch.
+  // Step 2: verify host-side that a PR now exists for the branch.
   const listResult = await shellRunner(
     "gh",
     [
