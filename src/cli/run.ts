@@ -51,6 +51,7 @@ import {
   listPRDs as defaultListPRDs,
   listStandaloneIssues as defaultListStandaloneIssues,
   transitionToInProgress as defaultTransitionToInProgress,
+  transitionToInReview as defaultTransitionToInReview,
   type LinearContext,
   type PRD,
   type StandaloneIssue,
@@ -145,6 +146,17 @@ export interface RunQueueAfterPickOptions {
    * confirms have been answered. For PRD roots this is the PRD itself; for
    * Standalone Issue roots this is the issue itself. */
   transitionRootToInProgress?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+  /**
+   * Test seam — defaults to `linear.transitionToInReview`. Fired by the
+   * post-submission hook after a clean queue + successful PR open against a
+   * PRD root, transitioning the PRD to *In Review*. Failure of this
+   * transition is non-fatal: the PR and earlier Linear writes are preserved
+   * and the failure surfaces as a warning in the run output.
+   */
+  transitionRootToInReview?: (
     ctx: LinearContext,
     issueId: string
   ) => Promise<void>;
@@ -438,6 +450,8 @@ export async function runQueueAfterPick(
   const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
   const transitionRootToInProgressFn =
     opts.transitionRootToInProgress ?? defaultTransitionToInProgress;
+  const transitionRootToInReviewFn =
+    opts.transitionRootToInReview ?? defaultTransitionToInReview;
 
   const root = rootMetaFromPicked(opts.picked);
 
@@ -625,6 +639,30 @@ export async function runQueueAfterPick(
     log.error(tail.outcome.message);
   } else if (tail.outcome.kind === "opened") {
     log.success(tail.outcome.url);
+  }
+
+  // Post-submission *In Review* hand-off (PRD roots only). Fires when the
+  // queue ran cleanly (every queued sub-issue completed, none flipped) AND
+  // the PR was opened. Any other combination skips with a warning so the
+  // user knows to transition the PRD manually. Transition failure preserves
+  // the PR and the queue's existing Linear writes — the failure surfaces as
+  // a warning, not a non-zero exit.
+  if (opts.picked.kind === "prd" && tail.outcome.kind === "opened") {
+    const queueClean = queueResult.completed > 0 && queueResult.flipped === 0;
+    if (queueClean) {
+      try {
+        await transitionRootToInReviewFn(opts.linearCtx, root.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn(
+          `Failed to transition PRD ${root.identifier} to In Review: ${msg}. PR was opened; transition the PRD manually in Linear.`
+        );
+      }
+    } else {
+      log.warn(
+        `PRD ${root.identifier} not transitioned to In Review — queue had flipped or incomplete sub-issues. Transition manually in Linear if appropriate.`
+      );
+    }
   }
 
   // Standalone-Issue end-of-run BLOCKED warning: when no commits landed on
