@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CreateWorktreeOptions, Worktree } from "@ai-hero/sandcastle";
 import {
   buildOrderedQueue,
   runPrTailStep,
@@ -25,6 +26,30 @@ import type {
 } from "../pr-submission/index.ts";
 import type { RootRef } from "../selector/index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
+
+/**
+ * Stub the `sandcastle.createWorktree(...)` test seam used by
+ * `runQueueAfterPick`. The returned `Worktree` shape only carries the
+ * fields the runner consumes (`branch`, `worktreePath`); the lifecycle
+ * methods are present to satisfy the type but are never reached because
+ * tide never calls them.
+ */
+function makeCreateWorktreeStub(
+  worktreePath = "/repo/.tide/worktrees/feature"
+): (opts: CreateWorktreeOptions) => Promise<Worktree> {
+  return () =>
+    Promise.resolve({
+      branch: "feature",
+      worktreePath,
+      run: () => Promise.reject(new Error("worktree.run not stubbed")),
+      interactive: () =>
+        Promise.reject(new Error("worktree.interactive not stubbed")),
+      createSandbox: () =>
+        Promise.reject(new Error("worktree.createSandbox not stubbed")),
+      close: () => Promise.resolve({}),
+      [Symbol.asyncDispose]: () => Promise.resolve(),
+    });
+}
 
 interface CallLog {
   events: string[];
@@ -1161,6 +1186,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
         fetchSubIssuesCalls += 1;
         return Promise.resolve([]);
       },
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
         return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
@@ -1220,6 +1246,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
         // here is fine — we only care that the guard didn't preempt.
         return Promise.reject(new Error("stop here"));
       },
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 0, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -1260,6 +1287,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
         fetchCalls.push({ issueId, repoName });
         return Promise.resolve([]);
       },
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 0, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -1299,6 +1327,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
         fetchCalls.push({ issueId, repoName });
         return Promise.resolve([]);
       },
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -1360,6 +1389,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
         events.push("fetchSubIssues");
         return Promise.resolve([] as SubIssue[]);
       },
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () => {
         events.push("runIssueQueue");
         return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
@@ -1414,6 +1444,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
         return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
@@ -1450,6 +1481,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
         return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
@@ -1491,6 +1523,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: (opts) => {
         capturedBaseBranch = opts.baseBranch;
         return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
@@ -1507,6 +1540,134 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     });
 
     expect(capturedBaseBranch).toBe("main");
+  });
+});
+
+describe("runQueueAfterPick — Feature worktree creation", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  test("creates the Feature worktree once on the picked branch and threads worktreePath into runIssueQueue", async () => {
+    const picked = makePRD({
+      id: "uuid-eng-7",
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    const createCalls: CreateWorktreeOptions[] = [];
+    let capturedFeaturePath: string | undefined;
+
+    await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "main",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: (opts) => {
+        createCalls.push(opts);
+        return Promise.resolve({
+          branch: "user/feature/eng-7",
+          worktreePath: "/repo/.tide/worktrees/feature-eng-7",
+          run: () => Promise.reject(new Error("not used")),
+          interactive: () => Promise.reject(new Error("not used")),
+          createSandbox: () => Promise.reject(new Error("not used")),
+          close: () => Promise.resolve({}),
+          [Symbol.asyncDispose]: () => Promise.resolve(),
+        });
+      },
+      runIssueQueue: (opts) => {
+        capturedFeaturePath = opts.featureWorktreePath;
+        return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(createCalls).toHaveLength(1);
+    const opts = createCalls[0];
+    if (!opts) throw new Error("unreachable");
+    // 'branch' strategy on the picked root's auto-generated branchName,
+    // forking from the user's invoked-from base branch.
+    expect(opts.branchStrategy).toEqual({
+      type: "branch",
+      branch: "user/feature/eng-7",
+      baseBranch: "main",
+    });
+    expect(opts.cwd).toBe("/repo");
+    // The handle's worktreePath is the value runIssueQueue receives.
+    expect(capturedFeaturePath).toBe("/repo/.tide/worktrees/feature-eng-7");
+  });
+
+  test("aborts cleanly when createWorktree fails (no queue run)", async () => {
+    const picked = makePRD({
+      id: "uuid-eng-7",
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+    let runIssueQueueCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "main",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: () =>
+        Promise.reject(new Error("worktree creation rejected")),
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(1);
+    expect(runIssueQueueCalls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Feature worktree");
+    expect(out).toContain("worktree creation rejected");
   });
 });
 
@@ -1576,6 +1737,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve(subIssues),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 2, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -1619,6 +1781,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve(subIssues),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -1675,6 +1838,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: tail,
@@ -1809,6 +1973,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       sandboxEnv: {},
       // No children — the no-children validator must succeed.
       fetchSubIssues: () => Promise.resolve([]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -1848,6 +2013,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: (opts) => {
         capturedOrdered = opts.orderedIssues;
         capturedRoot = opts.root;
@@ -1895,6 +2061,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
             blockedBy: [],
           },
         ] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
         return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
@@ -1954,6 +2121,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
           },
         ] as SubIssue[]);
       },
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
         return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
@@ -1992,6 +2160,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: () =>
@@ -2030,6 +2199,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -2071,6 +2241,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       // `ready-for-human`. The Standalone-specific warning must not fire —
       // the per-sub-issue warning (logged inside the runner, not here) is
       // the only BLOCKED hand-off the user should see.
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: () =>
@@ -2103,6 +2274,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
@@ -2135,6 +2307,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: (opts) => {
@@ -2188,6 +2361,7 @@ describe("runQueueAfterPick — PR-tail subIssueRefs come from runner.processed 
         ] as SubIssue[]),
       // Runner reports it processed two — initial + one absorbed via the
       // mid-run queue rebuild (ENG-3). The PR-tail step must reflect both.
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({
           completed: 2,
@@ -2272,6 +2446,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
@@ -2303,6 +2478,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: optedOutTail,
@@ -2334,6 +2510,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 1, processed: [] }),
       runPrTailStep: openedTail,
@@ -2366,6 +2543,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: optedOutTail,
@@ -2396,6 +2574,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
@@ -2475,6 +2654,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
@@ -2506,6 +2686,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: optedOutTail,
@@ -2537,6 +2718,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: openedTail,
@@ -2570,6 +2752,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: optedOutTail,
@@ -2601,6 +2784,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,

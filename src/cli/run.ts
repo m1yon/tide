@@ -29,6 +29,11 @@ import {
   isCancel,
   cancel,
 } from "@clack/prompts";
+import {
+  createWorktree as defaultCreateWorktree,
+  type CreateWorktreeOptions,
+  type Worktree,
+} from "@ai-hero/sandcastle";
 import { createBridgeIfMissing } from "../sandcastle-bridge/index.ts";
 import { build as defaultBuild, type BuildOptions } from "./build.ts";
 import { loadConfig, type TideConfig } from "../config-loader/index.ts";
@@ -191,6 +196,15 @@ export interface RunQueueAfterPickOptions {
     ctx: LinearContext,
     issueId: string
   ) => Promise<void>;
+  /**
+   * Test seam — defaults to sandcastle's top-level `createWorktree`. Used
+   * to create the long-lived Feature worktree once per `tide run`, after
+   * the user's pre-flight confirms succeed and before `runIssueQueue`
+   * fires. Tide never closes the returned `Worktree` handle, so the
+   * worktree directory persists across runs (sandcastle's collision
+   * detection reuses an existing managed worktree on the next invocation).
+   */
+  createWorktree?: (opts: CreateWorktreeOptions) => Promise<Worktree>;
 }
 
 export interface RunPrTailStepOptions {
@@ -383,6 +397,7 @@ export async function runQueueAfterPick(
     opts.transitionRootToInProgress ?? defaultTransitionToInProgress;
   const transitionRootToInReviewFn =
     opts.transitionRootToInReview ?? defaultTransitionToInReview;
+  const createWorktreeFn = opts.createWorktree ?? defaultCreateWorktree;
 
   const root = rootMetaFromPicked(opts.picked);
 
@@ -524,6 +539,29 @@ export async function runQueueAfterPick(
     return 1;
   }
 
+  // Create (or reuse) the long-lived Feature worktree before running the
+  // queue. The worktree persists across `tide run` invocations on the same
+  // root — sandcastle's collision detection reuses an existing managed
+  // worktree at `<repoRoot>/.tide/worktrees/<sanitized-feature-branch>/`.
+  // Tide never closes the returned handle. Each iteration runs in its own
+  // ephemeral worktree beneath this one (see runner module).
+  let featureWorktree: Worktree;
+  try {
+    featureWorktree = await createWorktreeFn({
+      branchStrategy: {
+        type: "branch",
+        branch: root.branchName,
+        baseBranch: opts.baseBranch,
+      },
+      cwd: opts.repoRoot,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(`Failed to create Feature worktree: ${msg}`);
+    outro("Aborted.");
+    return 1;
+  }
+
   const queueResult = await runIssueQueueFn({
     root:
       opts.picked.kind === "prd"
@@ -534,6 +572,7 @@ export async function runQueueAfterPick(
     baseBranch: opts.baseBranch,
     linearCtx: opts.linearCtx,
     repoRoot: opts.repoRoot,
+    featureWorktreePath: featureWorktree.worktreePath,
     config: opts.config,
     sandboxEnv: opts.sandboxEnv,
     repoName: opts.ghRepo.repo,
