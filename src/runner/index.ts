@@ -57,14 +57,17 @@ import { log } from "@clack/prompts";
 import type { TideConfig } from "../config-loader/index.ts";
 import {
   fetchIssueContent as defaultFetchIssueContent,
+  fetchSubIssues as defaultFetchSubIssues,
   flipLabelToReadyForHuman as defaultFlipLabelToReadyForHuman,
   postComment as defaultPostComment,
   transitionToDone as defaultTransitionToDone,
   transitionToInProgress as defaultTransitionToInProgress,
   type LinearContext,
   type LinearIssueContent,
+  type SubIssue,
 } from "../linear/index.ts";
 import { buildPromptArgs } from "../prompt-args/index.ts";
+import { buildOrderedQueue } from "../queue-build/index.ts";
 import { readFinalAssistantMessage as defaultReadFinalAssistantMessage } from "../transcript-extract/index.ts";
 import {
   renderSummarizerPrompt,
@@ -216,6 +219,10 @@ export interface RunIssueQueueOptions {
    * `git push -u origin <branch>` on the host after every working-agent
    * iteration that produced commits. See ADR-0007. */
   shellRunner?: ShellRunner;
+  /** Test seam — defaults to `linear.fetchSubIssues`. Called at every
+   * iteration boundary on PRD roots to absorb mid-run additions. See
+   * ADR-0010. Standalone roots never call this. */
+  fetchSubIssues?: (ctx: LinearContext, prdId: string) => Promise<SubIssue[]>;
 }
 
 export interface RunIssueQueueResult {
@@ -227,6 +234,10 @@ export interface RunIssueQueueResult {
   // agent-FAIL). The queue continues past these; they don't count toward
   // `completed`.
   flipped: number;
+  // Every sub-issue the runner ran an iteration on, in run order — including
+  // ones absorbed by a mid-run queue rebuild. The CLI's PR-tail step renders
+  // the "Sub-issues addressed" block from this. See ADR-0010.
+  processed: OrderedIssue[];
   // The issue that aborted the loop on an infra failure, if any.
   abortedAt?: {
     identifier: string;
@@ -392,6 +403,122 @@ async function pushBranchToOrigin(
 }
 
 /**
+ * Parse the first Linear-identifier-shaped token (e.g. "ENG-12") out of a
+ * `buildOrderedQueue` error string, so the rebuild's warn-and-skip path
+ * knows which candidate to drop on the retry attempt. Both error shapes
+ * surface the offending Sub-issue's identifier first:
+ *   - external-blocker: `Sub-issue ENG-X is blocked by ENG-Y, ...`
+ *   - cycle:            `... Offending edges:\n  ENG-X -> ENG-Y\n  ...`
+ */
+const OFFENDING_IDENTIFIER_RE = /[A-Z][A-Z0-9]*-\d+/;
+function parseOffendingIdentifier(message: string): string | undefined {
+  const match = OFFENDING_IDENTIFIER_RE.exec(message);
+  return match?.[0];
+}
+
+/** Outcome of a single iteration-boundary queue rebuild. */
+type RebuildOutcome =
+  | { kind: "queue"; queue: OrderedIssue[] }
+  | { kind: "fetch-failed"; reason: string }
+  | { kind: "abort"; identifier: string; reason: string };
+
+/**
+ * Re-fetch the picked PRD's direct children and rebuild the topo-ordered
+ * queue. The fetch result is fed to `buildOrderedQueue` unmodified — its
+ * existing closed-blocker / external-blocker / cycle handling subsumes the
+ * "exclude already-handled identifiers" rule (handled-Done sub-issues come
+ * back as `stateType: "completed"` which drops them from the order;
+ * handled-flipped ones come back without `ready-for-agent` which excludes
+ * them from in-scope). The outer loop's `handled.has` guard at pick time
+ * is the belt-and-braces against any stale Linear view.
+ *
+ * Logs one `Picked up new sub-issue: <id> <title>` line per identifier
+ * that wasn't already announced (pre-flight or a prior rebuild).
+ *
+ * - `fetchSubIssues` exception → warn-and-continue: the caller keeps the
+ *   previous boundary's queue.
+ * - topo error → warn-and-skip: drop the parsed offending identifier from
+ *   the candidate set and retry once. If the retry also errors, the caller
+ *   aborts via the existing infra-failure path.
+ * - empty `ready-for-agent` set → empty queue (loop ends).
+ */
+async function rebuildQueueAtBoundary(args: {
+  linearCtx: LinearContext;
+  prdId: string;
+  fetchSubIssues: (ctx: LinearContext, prdId: string) => Promise<SubIssue[]>;
+  knownIdentifiers: Set<string>;
+}): Promise<RebuildOutcome> {
+  let subIssues: SubIssue[];
+  try {
+    subIssues = await args.fetchSubIssues(args.linearCtx, args.prdId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { kind: "fetch-failed", reason: msg };
+  }
+
+  // Don't pre-filter `handled` identifiers from the candidate set:
+  //   - handled-Done sub-issues fetch back with `stateType: "completed"`,
+  //     which `buildOrderedQueue`'s `closedAmongDirectChildren` map drops
+  //     from any dependent's `blockedBy` (treating the blocker as
+  //     satisfied). A new arrival X with `blockedBy: [Done-sibling]`
+  //     resolves cleanly.
+  //   - handled-flipped sub-issues fetch back without `ready-for-agent`,
+  //     so `buildOrderedQueue`'s in-scope filter already excludes them. A
+  //     new arrival blocked by a flipped sibling surfaces as external-
+  //     blocker (warn-and-skip below) — exactly the desired behaviour.
+  // The runner's outer loop already guards re-running an identifier via
+  // its `handled.has` check at pick time, so the pre-filter is redundant
+  // and would silently break the topo-correctness for handled-Done
+  // dependents.
+  let dropped: Set<string> | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const candidates =
+      dropped === undefined
+        ? subIssues
+        : subIssues.filter((s) => dropped?.has(s.identifier) !== true);
+    const result = buildOrderedQueue(candidates);
+    if (result.kind === "queue") {
+      const queue: OrderedIssue[] = result.ordered.map((o) => ({
+        id: o.id,
+        identifier: o.identifier,
+        title: o.title,
+      }));
+      for (const o of queue) {
+        if (!args.knownIdentifiers.has(o.identifier)) {
+          log.info(`Picked up new sub-issue: ${o.identifier} ${o.title}`);
+          args.knownIdentifiers.add(o.identifier);
+        }
+      }
+      return { kind: "queue", queue };
+    }
+    if (result.kind === "standalone") {
+      // No `ready-for-agent` direct children remain — every queued unit was
+      // either handled this run or had its label removed. Loop terminates.
+      return { kind: "queue", queue: [] };
+    }
+    const offending = parseOffendingIdentifier(result.message);
+    if (attempt === 0 && offending !== undefined) {
+      log.warn(
+        `Queue rebuild error involving ${offending} — skipping it and retrying. ${result.message}`
+      );
+      dropped = new Set([offending]);
+      continue;
+    }
+    return {
+      kind: "abort",
+      identifier: offending ?? "unknown",
+      reason: `queue rebuild failed after retry: ${result.message}`,
+    };
+  }
+  // Unreachable: the loop returns on every branch.
+  return {
+    kind: "abort",
+    identifier: "unknown",
+    reason: "queue rebuild exhausted retries",
+  };
+}
+
+/**
  * Build the path under `<repoRoot>/.tide/logs/` where one specific run's
  * log file lands. Sandcastle's default file path lives under
  * `.sandcastle/logs/` (which the host bridges to `.tide/logs/` via a
@@ -426,6 +553,7 @@ export async function runIssueQueue(
   } = options;
   const fetchIssueContentFn =
     options.fetchIssueContent ?? defaultFetchIssueContent;
+  const fetchSubIssuesFn = options.fetchSubIssues ?? defaultFetchSubIssues;
   const transitionToInProgressFn =
     options.transitionToInProgress ?? defaultTransitionToInProgress;
   const transitionToDoneFn =
@@ -483,8 +611,26 @@ export async function runIssueQueue(
 
   let completed = 0;
   let flipped = 0;
+  const processed: OrderedIssue[] = [];
+  // Identifiers of Sub-issues this run has transitioned to Done OR flipped
+  // to ready-for-human. Excluded from every queue rebuild (and from the
+  // initial pre-flight queue's pick on the first iteration).
+  const handled = new Set<string>();
+  // Identifiers tide has already announced — either via the pre-flight log
+  // ("PRD-rooted: N sub-issue(s)") or a prior boundary's "Picked up new
+  // sub-issue" line. Used to dedupe the absorption log so we don't re-claim
+  // an arrival each time it survives a rebuild.
+  const knownIdentifiers = new Set<string>(
+    orderedIssues.map((o) => o.identifier)
+  );
+  let currentQueue: OrderedIssue[] = [...orderedIssues];
+
   try {
-    for (const ordered of orderedIssues) {
+    for (;;) {
+      const ordered = currentQueue.find((o) => !handled.has(o.identifier));
+      if (ordered === undefined) {
+        break;
+      }
       log.info(`Starting ${ordered.identifier}: ${ordered.title}`);
 
       let issueContent: LinearIssueContent;
@@ -496,6 +642,7 @@ export async function runIssueQueue(
         return {
           completed,
           flipped,
+          processed,
           abortedAt: {
             identifier: ordered.identifier,
             reason: `fetch failed: ${msg}`,
@@ -516,6 +663,7 @@ export async function runIssueQueue(
         return {
           completed,
           flipped,
+          processed,
           abortedAt: {
             identifier: ordered.identifier,
             reason: `transition to In Progress failed: ${msg}`,
@@ -563,6 +711,7 @@ export async function runIssueQueue(
         return {
           completed,
           flipped,
+          processed,
           abortedAt: {
             identifier: ordered.identifier,
             reason: `run() threw: ${msg}`,
@@ -635,6 +784,7 @@ export async function runIssueQueue(
           return {
             completed,
             flipped,
+            processed,
             abortedAt: {
               identifier: ordered.identifier,
               reason: `label flip failed: ${msg}`,
@@ -649,6 +799,7 @@ export async function runIssueQueue(
           return {
             completed,
             flipped,
+            processed,
             abortedAt: {
               identifier: ordered.identifier,
               reason: `comment post failed: ${msg}`,
@@ -656,47 +807,84 @@ export async function runIssueQueue(
           };
         }
         flipped++;
-        continue;
+        handled.add(ordered.identifier);
+        processed.push(ordered);
+      } else {
+        // DONE signalled and committed.
+        //
+        // PRD roots: the queued unit is a Sub-issue; transition it to *Done*
+        // host-side so the user sees real-time per-iteration progress in
+        // Linear (ADR-0005). A failure here is an infra failure: queue aborts.
+        //
+        // Standalone roots: the queued unit is the Standalone Issue itself.
+        // Skip the host-side Done transition — the Standalone Issue stays at
+        // *In Progress* and the CLI orchestration layer's post-submission
+        // hook transitions it to *In Review* once the PR is opened. This
+        // prevents the misleading-state case where the parent claims Done
+        // before review.
+        if (root.kind === "prd") {
+          try {
+            await transitionToDoneFn(linearCtx, ordered.id);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.error(
+              `Failed to transition ${ordered.identifier} to Done: ${msg}`
+            );
+            return {
+              completed,
+              flipped,
+              processed,
+              abortedAt: {
+                identifier: ordered.identifier,
+                reason: `transition to Done failed: ${msg}`,
+              },
+            };
+          }
+        }
+
+        completed++;
+        handled.add(ordered.identifier);
+        processed.push(ordered);
+        log.success(
+          `${ordered.identifier} done (${String(result.commits.length)} commit(s))`
+        );
       }
 
-      // DONE signalled and committed.
-      //
-      // PRD roots: the queued unit is a Sub-issue; transition it to *Done*
-      // host-side so the user sees real-time per-iteration progress in
-      // Linear (ADR-0005). A failure here is an infra failure: queue aborts.
-      //
-      // Standalone roots: the queued unit is the Standalone Issue itself.
-      // Skip the host-side Done transition — the Standalone Issue stays at
-      // *In Progress* and the CLI orchestration layer's post-submission
-      // hook transitions it to *In Review* once the PR is opened. This
-      // prevents the misleading-state case where the parent claims Done
-      // before review.
+      // Iteration boundary (PRD roots only). Re-fetch the picked PRD's
+      // direct children, exclude already-handled identifiers, and rebuild
+      // the topo order — absorbing any Sub-issues the human added in
+      // Linear's UI mid-run. Standalone Issue roots have no children and no
+      // boundary. See ADR-0010.
       if (root.kind === "prd") {
-        try {
-          await transitionToDoneFn(linearCtx, ordered.id);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.error(
-            `Failed to transition ${ordered.identifier} to Done: ${msg}`
+        const outcome = await rebuildQueueAtBoundary({
+          linearCtx,
+          prdId: root.id,
+          fetchSubIssues: fetchSubIssuesFn,
+          knownIdentifiers,
+        });
+        if (outcome.kind === "queue") {
+          currentQueue = outcome.queue;
+        } else if (outcome.kind === "fetch-failed") {
+          log.warn(
+            `fetchSubIssues failed mid-run: ${outcome.reason} — continuing with previous queue`
           );
+          // Keep `currentQueue` unchanged; next boundary's call retries.
+        } else {
+          log.error(`Aborting after queue rebuild error: ${outcome.reason}`);
           return {
             completed,
             flipped,
+            processed,
             abortedAt: {
-              identifier: ordered.identifier,
-              reason: `transition to Done failed: ${msg}`,
+              identifier: outcome.identifier,
+              reason: outcome.reason,
             },
           };
         }
       }
-
-      completed++;
-      log.success(
-        `${ordered.identifier} done (${String(result.commits.length)} commit(s))`
-      );
     }
 
-    return { completed, flipped };
+    return { completed, flipped, processed };
   } finally {
     if (sandbox !== undefined) {
       await sandbox.close().catch(() => {
