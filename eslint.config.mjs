@@ -3,7 +3,7 @@ import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig(
-  { ignores: ["src/cli/init-templates/**", ".tide/**"] },
+  { ignores: ["src/cli/setup-templates/**", ".tide/**"] },
   js.configs.recommended,
   tseslint.configs.strictTypeChecked,
   tseslint.configs.stylisticTypeChecked,

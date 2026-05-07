@@ -1,4 +1,5 @@
 import { confirm, intro, isCancel, log, outro, spinner } from "@clack/prompts";
+import { join, relative } from "node:path";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
@@ -15,6 +16,65 @@ import {
   describeBridgeForUser,
   repairBridge,
 } from "../sandcastle-bridge/index.ts";
+import {
+  writeTemplates,
+  type WriteResult,
+  type WriteTarget,
+} from "../template-writer/index.ts";
+import configTsRaw from "./setup-templates/tide/config.ts" with { type: "text" };
+import dockerfile from "./setup-templates/tide/Dockerfile" with { type: "text" };
+import promptMd from "./setup-templates/tide/prompt.md" with { type: "text" };
+import promptStandaloneMd from "./setup-templates/tide/prompt-standalone.md" with { type: "text" };
+import envExample from "./setup-templates/tide/.env.example" with { type: "text" };
+import gitignore from "./setup-templates/tide/.gitignore" with { type: "text" };
+import tideToPrdSkillMd from "./setup-templates/claude-skills/tide-to-prd/SKILL.md" with { type: "text" };
+import tideToIssuesSkillMd from "./setup-templates/claude-skills/tide-to-issues/SKILL.md" with { type: "text" };
+import tideTriageSkillMd from "./setup-templates/claude-skills/tide-triage/SKILL.md" with { type: "text" };
+import tideTriageAgentBriefMd from "./setup-templates/claude-skills/tide-triage/AGENT-BRIEF.md" with { type: "text" };
+import tideTriageOutOfScopeMd from "./setup-templates/claude-skills/tide-triage/OUT-OF-SCOPE.md" with { type: "text" };
+
+const configTs = configTsRaw as unknown as string;
+
+/**
+ * `.tide/` scaffold targets. The user is expected to hand-edit `config.ts`,
+ * `prompt.md`, etc. after first creation, so the policy is `skip-if-exists`.
+ */
+const TIDE_SCAFFOLD: readonly { relPath: string; content: string }[] = [
+  { relPath: ".tide/config.ts", content: configTs },
+  { relPath: ".tide/Dockerfile", content: dockerfile },
+  { relPath: ".tide/prompt.md", content: promptMd },
+  { relPath: ".tide/prompt-standalone.md", content: promptStandaloneMd },
+  { relPath: ".tide/.env.example", content: envExample },
+  { relPath: ".tide/.gitignore", content: gitignore },
+];
+
+/**
+ * Bundled-skill targets. tide owns these bytes — re-running setup overwrites
+ * any local edit (silently if identical). Forks live under a different name
+ * (e.g. `.claude/skills/my-to-prd/`), which tide leaves alone.
+ */
+const BUNDLED_SKILLS: readonly { relPath: string; content: string }[] = [
+  {
+    relPath: ".claude/skills/tide-to-prd/SKILL.md",
+    content: tideToPrdSkillMd,
+  },
+  {
+    relPath: ".claude/skills/tide-to-issues/SKILL.md",
+    content: tideToIssuesSkillMd,
+  },
+  {
+    relPath: ".claude/skills/tide-triage/SKILL.md",
+    content: tideTriageSkillMd,
+  },
+  {
+    relPath: ".claude/skills/tide-triage/AGENT-BRIEF.md",
+    content: tideTriageAgentBriefMd,
+  },
+  {
+    relPath: ".claude/skills/tide-triage/OUT-OF-SCOPE.md",
+    content: tideTriageOutOfScopeMd,
+  },
+];
 
 /**
  * Test seam — defaults to the real `linear.setupLabels`. Tests stub this to
@@ -60,18 +120,49 @@ async function defaultConfirmBridgeRepair(): Promise<boolean> {
   return answer;
 }
 
+interface SummaryRow {
+  kind: "label" | "state" | "file";
+  name: string;
+}
+
+function summaryRowFromFile(repoRoot: string, r: WriteResult): SummaryRow {
+  return { kind: "file", name: relative(repoRoot, r.targetPath) };
+}
+
+function emitSummary(created: SummaryRow[], existing: SummaryRow[]): void {
+  if (created.length > 0) {
+    log.success(
+      ["Created:", ...created.map((r) => `  - ${r.name} (${r.kind})`)].join(
+        "\n"
+      )
+    );
+  }
+  if (existing.length > 0) {
+    log.message(
+      [
+        "Already present:",
+        ...existing.map((r) => `  - ${r.name} (${r.kind})`),
+      ].join("\n")
+    );
+  }
+}
+
 /**
- * `tide setup` — idempotently provision everything tide expects on the
- * configured Linear team:
- *  - the three canonical labels (`prd`, `ready-for-agent`, `ready-for-human`)
+ * `tide setup` — idempotently provision everything tide expects on a tide-
+ * managed repo:
+ *  - the sandcastle bridge symlink
+ *  - the `.tide/` scaffold (config.ts, Dockerfile, prompt.md,
+ *    prompt-standalone.md, .env.example, .gitignore), skip-if-exists so
+ *    user-edited files are preserved
+ *  - the three canonical Linear labels (`prd`, `ready-for-agent`,
+ *    `ready-for-human`)
  *  - the `"In Review"` workflow state, positioned strictly between
  *    "In Progress" and "Done"
  *
  * Reports per-resource whether it was created or was already present in a
- * single unified summary. Re-running on a fully provisioned team is a no-op
+ * single unified summary. Re-running on a fully provisioned repo is a no-op
  * that exits zero. Each step's failure is reported independently — a label
- * failure does not skip the state step, and vice versa, so the summary
- * always tells the user what is and is not present on the team.
+ * failure does not skip the state step, and vice versa.
  */
 export async function setup(options: SetupOptions = {}): Promise<number> {
   const setupLabelsFn = options.setupLabels ?? defaultSetupLabels;
@@ -125,11 +216,50 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     }
   }
 
+  // Step 2: `.tide/` scaffold writes. Skip-if-exists so user-edited files
+  // (config.ts, prompt.md) survive a re-run. Runs before env/config loading
+  // so a brand-new repo gets the scaffold (including .env.example) on the
+  // first `tide setup`, even though env loading will fail downstream.
+  const scaffoldTargets: WriteTarget[] = TIDE_SCAFFOLD.map(
+    ({ relPath, content }) => ({
+      targetPath: join(repoRoot, relPath),
+      content,
+      policy: "skip-if-exists",
+    })
+  );
+  const scaffoldResults = writeTemplates(scaffoldTargets);
+
+  // Step 3: bundled-skill writes. tide owns these bytes — overwrite-silent-
+  // if-identical means a no-op when the local file matches the embedded
+  // version, an mtime-changing rewrite otherwise. The scope is bounded to
+  // the `tide-*/` namespace under `.claude/skills/`; user-authored skills
+  // outside that prefix are never touched.
+  const skillTargets: WriteTarget[] = BUNDLED_SKILLS.map(
+    ({ relPath, content }) => ({
+      targetPath: join(repoRoot, relPath),
+      content,
+      policy: "overwrite-silent-if-identical",
+    })
+  );
+  const skillResults = writeTemplates(skillTargets);
+
+  const created: SummaryRow[] = [];
+  const existing: SummaryRow[] = [];
+  for (const r of [...scaffoldResults, ...skillResults]) {
+    const row = summaryRowFromFile(repoRoot, r);
+    if (r.outcome === "created" || r.outcome === "overwritten") {
+      created.push(row);
+    } else {
+      existing.push(row);
+    }
+  }
+
   let envMap: Record<string, string>;
   try {
     envMap = loadEnv({ repoRoot });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    emitSummary(created, existing);
     log.error(msg);
     outro("Aborted.");
     return 1;
@@ -137,6 +267,7 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
 
   const apiKey = envMap.LINEAR_API_KEY;
   if (typeof apiKey !== "string" || apiKey === "") {
+    emitSummary(created, existing);
     log.error("LINEAR_API_KEY is empty in .tide/.env");
     outro("Aborted.");
     return 1;
@@ -148,6 +279,7 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     teamKey = config.linear.team;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    emitSummary(created, existing);
     log.error(msg);
     outro("Aborted.");
     return 1;
@@ -184,12 +316,6 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     stateSpin.stop('"In Review" workflow state provisioning failed');
   }
 
-  interface SummaryRow {
-    kind: "label" | "state";
-    name: string;
-  }
-  const created: SummaryRow[] = [];
-  const existing: SummaryRow[] = [];
   if (labelResults !== undefined) {
     for (const r of labelResults) {
       (r.created ? created : existing).push({ kind: "label", name: r.name });
@@ -202,21 +328,7 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     });
   }
 
-  if (created.length > 0) {
-    log.success(
-      ["Created:", ...created.map((r) => `  - ${r.name} (${r.kind})`)].join(
-        "\n"
-      )
-    );
-  }
-  if (existing.length > 0) {
-    log.message(
-      [
-        "Already present:",
-        ...existing.map((r) => `  - ${r.name} (${r.kind})`),
-      ].join("\n")
-    );
-  }
+  emitSummary(created, existing);
 
   if (labelError !== undefined) {
     log.error(`label provisioning failed: ${labelError}`);
