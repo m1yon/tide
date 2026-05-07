@@ -1,17 +1,20 @@
-// Orchestration tests for `runIssueQueue` with the sandbox stubbed. The
-// goal is contract coverage of the runner's per-iteration flow:
+// Orchestration tests for `runIssueQueue` with the per-iteration
+// `sandcastle.run(...)` call stubbed. The goal is contract coverage of the
+// runner's per-iteration flow:
 //
-// - sub-issue is transitioned to In Progress *before* sandbox.run() fires
+// - sub-issue is transitioned to In Progress *before* sandcastle.run() fires
+// - each working-agent iteration uses `branchStrategy: 'merge-to-head'` and
+//   `cwd: featureWorktreePath`
 // - DONE signal + commits → transition to Done, queue continues
-// - BLOCKED signal → run summarizer, post summarizer-generated comment,
-//   flip label, continue
+// - BLOCKED signal → run summarizer (separate sandcastle.run call), post
+//   summarizer-generated comment, flip label, continue
 // - agent-FAIL (no DONE, no commits) → same path as BLOCKED with the
 //   `fail-summary` prompt
 // - infra FAIL (run() throws) → queue aborts, no label flip, no summarizer
 // - per-iteration prompt args carry baseBranch through
 
 import { describe, expect, test } from "bun:test";
-import type { SandboxRunOptions, SandboxRunResult } from "@ai-hero/sandcastle";
+import type { RunOptions, RunResult } from "@ai-hero/sandcastle";
 import {
   BLOCKED_SIGNAL,
   DONE_SIGNAL,
@@ -92,14 +95,13 @@ function makeOrdered(overrides: Partial<OrderedIssue> = {}): OrderedIssue {
   };
 }
 
-function makeSandboxRunResult(
-  overrides: Partial<SandboxRunResult> = {}
-): SandboxRunResult {
+function makeRunResult(overrides: Partial<RunResult> = {}): RunResult {
   return {
     iterations: [],
     completionSignal: DONE_SIGNAL,
     stdout: "",
     commits: [{ sha: "abc" }],
+    branch: "feature/eng-1",
     logFilePath: "/tmp/working.log",
     ...overrides,
   };
@@ -116,6 +118,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -132,9 +135,9 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push(`done:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => {
+      sandcastleRun: () => {
         events.push("run");
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
     });
 
@@ -167,6 +170,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -196,7 +200,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         postedComments.push({ issueId, body });
         return Promise.resolve();
       },
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         events.push(`run:${opts.name ?? "unknown"}`);
         sandboxRunNames.push(opts.name ?? "unknown");
         runCount += 1;
@@ -205,7 +209,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         // succeeds.
         if (runCount === 1) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: undefined,
               logFilePath: "/tmp/eng-1-working.log",
@@ -214,14 +218,14 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         }
         if (runCount === 2) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: undefined,
               logFilePath: "/tmp/eng-1-summarizer.log",
             })
           );
         }
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
       readFinalAssistantMessage: (logFilePath: string) => {
         events.push(`extract:${logFilePath}`);
@@ -281,6 +285,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -309,12 +314,12 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         postedComments.push({ issueId, body });
         return Promise.resolve();
       },
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         events.push(`run:${opts.name ?? "unknown"}`);
         runCount += 1;
         if (runCount === 1) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [{ sha: "partial" }],
               completionSignal: BLOCKED_SIGNAL,
               logFilePath: "/tmp/eng-1-working.log",
@@ -325,14 +330,14 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
           summarizerPromptSeen =
             typeof opts.prompt === "string" ? opts.prompt : undefined;
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: undefined,
               logFilePath: "/tmp/eng-1-summarizer.log",
             })
           );
         }
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
       readFinalAssistantMessage: (logFilePath: string) => {
         if (logFilePath === "/tmp/eng-1-summarizer.log") {
@@ -383,6 +388,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -392,12 +398,12 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       transitionToDone: () => Promise.resolve(),
       flipLabelToReadyForHuman: () => Promise.resolve(),
       postComment: () => Promise.resolve(),
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         // Capture only the working-agent invocation (not the summarizer).
         if (opts.name === "tide") {
           capturedSignal = opts.completionSignal;
         }
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
     });
 
@@ -419,6 +425,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -440,18 +447,18 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push("comment");
         return Promise.resolve();
       },
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         events.push(`run:${opts.name ?? "unknown"}`);
         if (opts.name === "tide") {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: DONE_SIGNAL,
             })
           );
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: undefined,
           })
@@ -484,6 +491,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -505,18 +513,18 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push("comment");
         return Promise.resolve();
       },
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         events.push(`run:${opts.name ?? "unknown"}`);
         if (opts.name === "tide") {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [{ sha: "abc" }],
               completionSignal: undefined,
             })
           );
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: undefined,
           })
@@ -548,6 +556,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -560,12 +569,12 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         postedComments.push({ issueId, body });
         return Promise.resolve();
       },
-      sandboxRun: () => {
+      sandcastleRun: () => {
         runCount += 1;
         // Working agent BLOCKED.
         if (runCount === 1) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: BLOCKED_SIGNAL,
               logFilePath: "/tmp/working.log",
@@ -599,6 +608,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -611,11 +621,11 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         postedComments.push({ issueId, body });
         return Promise.resolve();
       },
-      sandboxRun: () => {
+      sandcastleRun: () => {
         runCount += 1;
         if (runCount === 1) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: BLOCKED_SIGNAL,
               logFilePath: "/tmp/working.log",
@@ -623,7 +633,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
           );
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: undefined,
             logFilePath: "/tmp/summarizer.log",
@@ -654,6 +664,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -675,11 +686,11 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push("comment");
         return Promise.resolve();
       },
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         events.push(`run:${opts.name ?? "unknown"}`);
         if (opts.name === "tide") {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: BLOCKED_SIGNAL,
               logFilePath: "/tmp/working.log",
@@ -687,7 +698,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
           );
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: undefined,
             logFilePath: "/tmp/summarizer.log",
@@ -718,6 +729,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -731,7 +743,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push("done");
         return Promise.resolve();
       },
-      sandboxRun: () => Promise.reject(new Error("docker daemon down")),
+      sandcastleRun: () => Promise.reject(new Error("docker daemon down")),
     });
 
     expect(result.completed).toBe(0);
@@ -753,6 +765,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -773,9 +786,9 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push(`done:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => {
+      sandcastleRun: () => {
         events.push("run");
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
     });
 
@@ -805,6 +818,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -818,7 +832,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         doneCalls.push(issueId);
         return Promise.resolve();
       },
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     expect(inProgressCalls).toEqual(["uuid-eng-1"]);
@@ -828,7 +842,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
 
 describe("runIssueQueue — prompt args + sandcastle wiring", () => {
   test("registers both DONE and BLOCKED signals with sandcastle and surfaces sub-issue identity in promptArgs", async () => {
-    let capturedOpts: SandboxRunOptions | undefined;
+    let capturedOpts: RunOptions | undefined;
 
     await runIssueQueue({
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -837,6 +851,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       baseBranch: "main",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -847,10 +862,10 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       transitionToDone: () => Promise.resolve(),
       flipLabelToReadyForHuman: () => Promise.resolve(),
       postComment: () => Promise.resolve(),
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         // Only capture the working-agent invocation (skip the summarizer).
         if (opts.name === "tide") capturedOpts = opts;
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
     });
 
@@ -862,14 +877,17 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     ]);
     const args = capturedOpts.promptArgs as Record<string, string>;
     expect(args.ISSUE_ID).toBe("ENG-7");
-    // SOURCE_BRANCH / TARGET_BRANCH are sandcastle built-ins; they must not
-    // appear in promptArgs (the SDK rejects overrides).
+    // FEATURE_BRANCH / BASE_BRANCH are tide-owned and supersede sandcastle's
+    // built-in SOURCE_BRANCH / TARGET_BRANCH (ADR-0014); the runner threads
+    // the caller-supplied `branch` and `baseBranch` through.
+    expect(args.FEATURE_BRANCH).toBe("user/feature/eng-7");
+    expect(args.BASE_BRANCH).toBe("main");
     expect(args.SOURCE_BRANCH).toBeUndefined();
     expect(args.TARGET_BRANCH).toBeUndefined();
   });
 
-  test("working-agent run uses file-based logging so the summarizer can read the transcript", async () => {
-    let capturedOpts: SandboxRunOptions | undefined;
+  test("working-agent iteration uses merge-to-head and runs with cwd=featureWorktreePath (ADR-0014)", async () => {
+    let capturedOpts: RunOptions | undefined;
 
     await runIssueQueue({
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -878,6 +896,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature-eng-1",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -885,9 +904,93 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         if (opts.name === "tide") capturedOpts = opts;
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
+      },
+    });
+
+    expect(capturedOpts).toBeDefined();
+    if (!capturedOpts) throw new Error("unreachable");
+    // Iteration worktree is created beneath the Feature worktree.
+    expect(capturedOpts.cwd).toBe("/repo/.tide/worktrees/feature-eng-1");
+    // Sandcastle owns the merge step; tide doesn't reimplement merge edge
+    // cases under the new runtime.
+    expect(capturedOpts.branchStrategy).toEqual({ type: "merge-to-head" });
+  });
+
+  test("summarizer iteration also runs in cwd=featureWorktreePath", async () => {
+    const captured: RunOptions[] = [];
+    let runCount = 0;
+
+    await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [makeOrdered()],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature-eng-1",
+      config: baseConfig,
+      sandboxEnv: {},
+      repoName: "tide",
+      fetchSubIssues: () => Promise.resolve([]),
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      flipLabelToReadyForHuman: () => Promise.resolve(),
+      postComment: () => Promise.resolve(),
+      sandcastleRun: (opts: RunOptions) => {
+        captured.push(opts);
+        runCount += 1;
+        // First call: working agent BLOCKED → triggers summarizer call.
+        if (runCount === 1) {
+          return Promise.resolve(
+            makeRunResult({
+              commits: [],
+              completionSignal: BLOCKED_SIGNAL,
+              logFilePath: "/tmp/working.log",
+            })
+          );
+        }
+        return Promise.resolve(
+          makeRunResult({
+            commits: [],
+            completionSignal: undefined,
+            logFilePath: "/tmp/summary.log",
+          })
+        );
+      },
+      readFinalAssistantMessage: () => Promise.resolve("summary text"),
+    });
+
+    expect(captured.map((c) => c.name)).toEqual(["tide", "tide-summarizer"]);
+    for (const c of captured) {
+      expect(c.cwd).toBe("/repo/.tide/worktrees/feature-eng-1");
+    }
+  });
+
+  test("working-agent run uses file-based logging so the summarizer can read the transcript", async () => {
+    let capturedOpts: RunOptions | undefined;
+
+    await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [makeOrdered()],
+      branch: "feature/eng-1",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
+      config: baseConfig,
+      sandboxEnv: {},
+      repoName: "tide",
+      fetchSubIssues: () => Promise.resolve([]),
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandcastleRun: (opts: RunOptions) => {
+        if (opts.name === "tide") capturedOpts = opts;
+        return Promise.resolve(makeRunResult());
       },
     });
 
@@ -911,6 +1014,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -929,18 +1033,18 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       // The agent emitted the *old* COMPLETE signal — sandcastle wouldn't
       // even have matched it because the runner registers DONE/BLOCKED only.
       // We simulate the post-iteration result directly.
-      sandboxRun: () => {
+      sandcastleRun: () => {
         runCount += 1;
         if (runCount === 1) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [{ sha: "abc" }],
               completionSignal: "<promise>COMPLETE</promise>",
             })
           );
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: undefined,
           })
@@ -970,6 +1074,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -977,7 +1082,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
       shellRunner: runner,
     });
 
@@ -998,6 +1103,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1007,12 +1113,12 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       transitionToDone: () => Promise.resolve(),
       flipLabelToReadyForHuman: () => Promise.resolve(),
       postComment: () => Promise.resolve(),
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         // Working-agent iteration: zero commits, no signal → agent-FAIL.
         // Summarizer iteration: also zero commits.
         if (opts.name === "tide") {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: undefined,
               logFilePath: "/tmp/working.log",
@@ -1020,7 +1126,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
           );
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: undefined,
             logFilePath: "/tmp/summarizer.log",
@@ -1047,6 +1153,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1054,7 +1161,8 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: () => Promise.reject(new Error("sandcastle ran out of disk")),
+      sandcastleRun: () =>
+        Promise.reject(new Error("sandcastle ran out of disk")),
       shellRunner: runner,
     });
 
@@ -1087,6 +1195,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1114,7 +1223,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
         events.push(`comment:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
       shellRunner: runner,
     });
 
@@ -1145,6 +1254,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1160,9 +1270,9 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
         events.push(`done:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => {
+      sandcastleRun: () => {
         events.push("run");
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
     });
 
@@ -1190,6 +1300,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1210,11 +1321,11 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
         events.push(`comment:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => {
+      sandcastleRun: () => {
         runCount += 1;
         if (runCount === 1) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: BLOCKED_SIGNAL,
               logFilePath: "/tmp/standalone-working.log",
@@ -1222,7 +1333,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
           );
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: undefined,
             logFilePath: "/tmp/standalone-summarizer.log",
@@ -1252,6 +1363,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1262,7 +1374,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
         doneCalls.push(issueId);
         return Promise.resolve();
       },
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     // Sub-issues continue to transition to Done host-side (real-time
@@ -1283,6 +1395,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1301,7 +1414,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
         Promise.resolve(makeIssueContent({ identifier: issueId })),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     expect(result.processed.map((o) => o.identifier)).toEqual([
@@ -1323,6 +1436,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1359,9 +1473,9 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
         events.push(`done:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => {
+      sandcastleRun: () => {
         events.push("run");
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
     });
 
@@ -1396,6 +1510,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1436,7 +1551,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
         events.push(`done:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     // Y ran first (it was the snapshot's only entry), then X was absorbed
@@ -1473,6 +1588,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1519,10 +1635,10 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       transitionToDone: () => Promise.resolve(),
       flipLabelToReadyForHuman: () => Promise.resolve(),
       postComment: () => Promise.resolve(),
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         if (opts.name === "tide-summarizer") {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: undefined,
               logFilePath: "/tmp/summary.log",
@@ -1535,14 +1651,14 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
         // (working ENG-2): clean success.
         if (runCount === 1) {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: BLOCKED_SIGNAL,
               logFilePath: "/tmp/eng-1.log",
             })
           );
         }
-        return Promise.resolve(makeSandboxRunResult());
+        return Promise.resolve(makeRunResult());
       },
       readFinalAssistantMessage: () =>
         Promise.resolve("summarized comment body"),
@@ -1571,6 +1687,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1611,7 +1728,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
         Promise.resolve(makeIssueContent({ identifier: issueId })),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     expect(result.abortedAt).toBeDefined();
@@ -1636,6 +1753,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1658,7 +1776,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
         events.push(`done:${issueId}`);
         return Promise.resolve();
       },
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     // ENG-2 still ran because the rebuild fell back to the previous queue.
@@ -1683,6 +1801,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1715,7 +1834,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
         Promise.resolve(makeIssueContent({ identifier: issueId })),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     expect(result.abortedAt).toBeUndefined();
@@ -1733,6 +1852,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1743,7 +1863,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     expect(fetchCalls).toBe(0);
@@ -1764,6 +1884,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "tide",
@@ -1793,13 +1914,13 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       transitionToDone: () => Promise.resolve(),
       flipLabelToReadyForHuman: () => Promise.resolve(),
       postComment: () => Promise.resolve(),
-      sandboxRun: (opts: SandboxRunOptions) => {
+      sandcastleRun: (opts: RunOptions) => {
         runCount += 1;
         // Iteration 1 (working): ENG-1 succeeds. Iteration 2 (working):
         // ENG-2 BLOCKEDs. Iteration 3 (summarizer for ENG-2).
         if (opts.name === "tide-summarizer") {
           return Promise.resolve(
-            makeSandboxRunResult({
+            makeRunResult({
               commits: [],
               completionSignal: undefined,
               logFilePath: "/tmp/eng-2-summary.log",
@@ -1807,10 +1928,10 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
           );
         }
         if (runCount === 1) {
-          return Promise.resolve(makeSandboxRunResult());
+          return Promise.resolve(makeRunResult());
         }
         return Promise.resolve(
-          makeSandboxRunResult({
+          makeRunResult({
             commits: [],
             completionSignal: BLOCKED_SIGNAL,
             logFilePath: "/tmp/eng-2-working.log",
@@ -1845,6 +1966,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       baseBranch: "master",
       linearCtx,
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature",
       config: baseConfig,
       sandboxEnv: {},
       repoName: "widget",
@@ -1860,7 +1982,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
-      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+      sandcastleRun: () => Promise.resolve(makeRunResult()),
     });
 
     // Two iterations → two boundaries → two rebuild fetches. Each must

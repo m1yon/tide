@@ -1,6 +1,6 @@
 You are working on Linear issue {{ISSUE_ID}}.
 
-Branch: {{SOURCE_BRANCH}} (PR will merge into {{TARGET_BRANCH}})
+Branch: {{FEATURE_BRANCH}} (PR will merge into {{BASE_BRANCH}})
 
 ## Issue: {{ISSUE_TITLE}}
 
@@ -8,11 +8,11 @@ Branch: {{SOURCE_BRANCH}} (PR will merge into {{TARGET_BRANCH}})
 
 ## CONTEXT
 
-Recent commits on this feature branch (since it diverged from `{{TARGET_BRANCH}}`):
+Recent commits on this feature branch (since it diverged from `{{BASE_BRANCH}}`):
 
 <recent-commits>
 
-!`git log {{TARGET_BRANCH}}..HEAD --oneline`
+!`git log {{BASE_BRANCH}}..{{FEATURE_BRANCH}} --oneline`
 
 </recent-commits>
 

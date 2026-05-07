@@ -1,14 +1,20 @@
 // Per-issue Sandcastle runner loop.
 //
-// The whole queue runs against a single, reusable sandcastle Sandbox: tide
-// creates one container + worktree at the top of the run via
-// `createSandbox(...)`, then calls `sandbox.run(...)` per working-agent
-// iteration *and* per summarizer invocation. Logging is forced to
-// `{ type: "file" }` (under `<repoRoot>/.tide/logs/`) so the summarizer can
-// read the working agent's transcript via the previous run's `logFilePath`.
-// The trade-off is silent-by-default progress on the user's terminal — tide
-// does not tail the log to stdout. The user inspects the .tide/logs file
-// after the run, or tails it themselves in a second terminal.
+// Each working-agent invocation runs in an ephemeral Iteration worktree
+// beneath the host's long-lived Feature worktree via a single
+// `sandcastle.run({ branchStrategy: 'merge-to-head', cwd: featureWorktreePath, ... })`
+// call. Sandcastle creates a temp branch + worktree + container, runs the
+// agent, merges the temp branch into the Feature worktree's feature branch
+// on sandbox close, and tears everything down. The Feature worktree itself
+// is created once per `tide run` by the CLI and threaded in as
+// `featureWorktreePath`; tide never closes the worktree handle, so the
+// directory persists across runs (sandcastle's collision detection reuses
+// it on next launch). Logging is forced to `{ type: "file" }` (under
+// `<repoRoot>/.tide/logs/`) so the summarizer can read the working agent's
+// transcript via the previous run's `logFilePath`. The trade-off is
+// silent-by-default progress on the user's terminal — tide does not tail
+// the log to stdout. The user inspects the .tide/logs file after the run,
+// or tails it themselves in a second terminal.
 //
 // The runner supports two root kinds via the `root` tagged union:
 //   - `kind: "prd"` — the queue iterates over a PRD's `ready-for-agent`
@@ -25,12 +31,13 @@
 //      PRD roots only) from Linear.
 //   2. Transition the issue to *In Progress* in Linear.
 //   3. Build promptArgs via the pure `buildPromptArgs` helper and call
-//      `sandbox.run(...)` with the appropriate prompt template.
+//      `sandcastle.run(...)` with the appropriate prompt template.
 //   4. Dispatch on the iteration's outcome:
 //        - DONE + commits → host transitions the issue to *Done*; queue
 //          continues.
-//        - BLOCKED / agent-FAIL → run the summarizer agent in the same
-//          sandbox, extract its final assistant message via the
+//        - BLOCKED / agent-FAIL → run the summarizer agent via a separate
+//          `sandcastle.run(...)` call (not the working agent's sandbox),
+//          extract its final assistant message via the
 //          `transcript-extract` module, post it as a Linear comment, then
 //          flip the issue's label from `ready-for-agent` to
 //          `ready-for-human` and continue. If the summarizer itself fails
@@ -45,12 +52,10 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import {
-  createSandbox as defaultCreateSandbox,
+  run as defaultSandcastleRun,
   claudeCode,
-  type CreateSandboxOptions,
-  type Sandbox,
-  type SandboxRunOptions,
-  type SandboxRunResult,
+  type RunOptions,
+  type RunResult,
 } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { log } from "@clack/prompts";
@@ -78,7 +83,7 @@ import {
  * Substring tide passes to sandcastle's `completionSignal`. The agent emits
  * this verbatim to mark a successful iteration; sandcastle short-circuits
  * the iteration loop and reports the matched signal back via
- * `SandboxRunResult.completionSignal`. The legacy `<promise>COMPLETE</promise>`
+ * `RunResult.completionSignal`. The legacy `<promise>COMPLETE</promise>`
  * marker is no longer accepted.
  */
 export const DONE_SIGNAL = "<promise>DONE</promise>";
@@ -86,8 +91,7 @@ export const DONE_SIGNAL = "<promise>DONE</promise>";
 /**
  * Substring the agent emits to declare itself gracefully stuck. Sandcastle
  * short-circuits on it just like DONE; the host distinguishes the two via
- * `SandboxRunResult.completionSignal` and routes BLOCKED to the label-flip
- * path.
+ * `RunResult.completionSignal` and routes BLOCKED to the label-flip path.
  */
 export const BLOCKED_SIGNAL = "<promise>BLOCKED</promise>";
 
@@ -109,14 +113,13 @@ export type RunRoot =
   | { kind: "standalone" };
 
 /**
- * Test seam type: a function with the same shape as `sandbox.run(...)` from
- * `@ai-hero/sandcastle`. Tests pass a stub; production wires
- * `sandbox.run.bind(sandbox)` of a real `Sandbox` created by
- * `createSandbox(...)`.
+ * Test seam type: a function with the same shape as the top-level
+ * `sandcastle.run(...)`. Tests pass a stub; production wires sandcastle's
+ * real `run`. Each call creates an Iteration worktree + container, runs
+ * the agent, merges the iteration's commits into the Feature worktree's
+ * branch on sandbox close, and tears everything down.
  */
-export type SandboxRunFn = (
-  opts: SandboxRunOptions
-) => Promise<SandboxRunResult>;
+export type SandcastleRunFn = (opts: RunOptions) => Promise<RunResult>;
 
 export interface ShellResult {
   exitCode: number;
@@ -175,6 +178,16 @@ export interface RunIssueQueueOptions {
   // Host repo root — absolute path. The runner uses this to resolve the
   // prompt file path and to anchor sandbox/worktree state.
   repoRoot: string;
+  /**
+   * Path to the long-lived Feature worktree on the host. Created by the
+   * CLI via `sandcastle.createWorktree(...)` once per `tide run` and
+   * threaded through. Each `sandcastle.run(...)` call passes this as
+   * `cwd`, so iteration worktrees are created beneath it and the
+   * iteration's commits merge into the feature branch held by this
+   * worktree. Tide never closes the corresponding `Worktree` handle, so
+   * the directory persists across runs.
+   */
+  featureWorktreePath: string;
   // Tide config (mounts, hooks). LINEAR_API_KEY is intentionally not
   // forwarded into the sandbox (host-side only).
   config: TideConfig;
@@ -211,15 +224,12 @@ export interface RunIssueQueueOptions {
   ) => Promise<void>;
   /** Test seam — when provided, no real sandbox is created. The function is
    * called for every working-agent iteration *and* every summarizer
-   * iteration. Defaults to `sandbox.run.bind(sandbox)` of a real
-   * `Sandbox` built via `createSandbox(...)`. */
-  sandboxRun?: SandboxRunFn;
+   * invocation. Defaults to sandcastle's top-level `run`. */
+  sandcastleRun?: SandcastleRunFn;
   /** Test seam — defaults to `transcript-extract.readFinalAssistantMessage`.
    * Reads a sandcastle log file from disk and returns the agent's final
    * assistant-message text. */
   readFinalAssistantMessage?: (logFilePath: string) => Promise<string>;
-  /** Test seam — defaults to sandcastle's `createSandbox`. */
-  createSandbox?: (opts: CreateSandboxOptions) => Promise<Sandbox>;
   /** Test seam — defaults to a `node:child_process` spawn. Used to fire
    * `git push -u origin <branch>` on the host after every working-agent
    * iteration that produced commits. See ADR-0007. */
@@ -272,7 +282,7 @@ export interface RunIssueQueueResult {
  * — those abort the queue and do not flip any label.
  */
 function classifyRun(
-  result: SandboxRunResult
+  result: RunResult
 ):
   | { kind: "done" }
   | { kind: "blocked" }
@@ -327,9 +337,14 @@ function buildFallbackComment(
 }
 
 /**
- * Run the summarizer agent inside the same sandbox, read its final
+ * Run the summarizer agent in its own ephemeral sandbox, read its final
  * assistant message back from its log file, and return the comment body.
  * Throws on any failure; the caller falls back to a placeholder comment.
+ *
+ * The summarizer is a separate `sandcastle.run(...)` call (not a reuse of
+ * the working agent's container). Branch strategy is non-load-bearing —
+ * `merge-to-head` matches the working-agent shape and is fine because the
+ * summarizer produces no commits.
  *
  * For Standalone Issue roots there is no parent PRD; `parentContent` /
  * `parentIdentifier` are undefined and the rendered prompt's parent fields
@@ -341,9 +356,12 @@ async function runSummarizer(args: {
   parentContent: LinearIssueContent | undefined;
   parentIdentifier: string | undefined;
   issueContent: LinearIssueContent;
-  sandboxRun: SandboxRunFn;
+  sandcastleRun: SandcastleRunFn;
   readFinalAssistantMessage: (logFilePath: string) => Promise<string>;
   summarizerLogPath: string;
+  featureWorktreePath: string;
+  sandboxEnv: Record<string, string>;
+  config: TideConfig;
 }): Promise<string> {
   if (args.workingAgentLogFilePath === undefined) {
     throw new Error("working agent did not produce a log file");
@@ -362,9 +380,20 @@ async function runSummarizer(args: {
     transcript,
   });
 
-  const summarizerResult = await args.sandboxRun({
+  const summarizerResult = await args.sandcastleRun({
     name: "tide-summarizer",
     agent: claudeCode("claude-opus-4-7"),
+    sandbox: docker({
+      mounts: args.config.sandbox.mounts,
+      env: args.sandboxEnv,
+    }),
+    cwd: args.featureWorktreePath,
+    branchStrategy: { type: "merge-to-head" },
+    hooks: {
+      sandbox: {
+        onSandboxReady: args.config.hooks.onSandboxReady,
+      },
+    },
     prompt: renderedPrompt,
     maxIterations: 1,
     logging: { type: "file", path: args.summarizerLogPath },
@@ -586,6 +615,7 @@ export async function runIssueQueue(
     baseBranch,
     linearCtx,
     repoRoot,
+    featureWorktreePath,
     config,
     sandboxEnv,
     repoName,
@@ -602,7 +632,7 @@ export async function runIssueQueue(
   const postCommentFn = options.postComment ?? defaultPostComment;
   const readFinalAssistantMessage =
     options.readFinalAssistantMessage ?? defaultReadFinalAssistantMessage;
-  const createSandboxFn = options.createSandbox ?? defaultCreateSandbox;
+  const sandcastleRun = options.sandcastleRun ?? defaultSandcastleRun;
   const shellRunner = options.shellRunner ?? defaultShellRunner;
 
   // PRD root: fetch the parent body once for PRD_CONTENT — it's stable
@@ -622,32 +652,6 @@ export async function runIssueQueue(
     root.kind === "prd" ? "prompt.md" : "prompt-standalone.md";
   const promptFile = path.join(repoRoot, ".tide", promptFileName);
 
-  // Either use the test-supplied sandboxRun seam, or eagerly create one
-  // sandbox for the entire queue. The reusable-sandbox shape lets us share
-  // the docker container + worktree across every working-agent iteration
-  // *and* every summarizer call — see ADR-0005 / S6.
-  let sandboxRun: SandboxRunFn;
-  let sandbox: Sandbox | undefined;
-  if (options.sandboxRun !== undefined) {
-    sandboxRun = options.sandboxRun;
-  } else {
-    sandbox = await createSandboxFn({
-      branch,
-      baseBranch,
-      cwd: repoRoot,
-      sandbox: docker({
-        mounts: config.sandbox.mounts,
-        env: sandboxEnv,
-      }),
-      hooks: {
-        sandbox: {
-          onSandboxReady: config.hooks.onSandboxReady,
-        },
-      },
-    });
-    sandboxRun = sandbox.run.bind(sandbox);
-  }
-
   let completed = 0;
   let flipped = 0;
   const processed: OrderedIssue[] = [];
@@ -664,161 +668,229 @@ export async function runIssueQueue(
   );
   let currentQueue: OrderedIssue[] = [...orderedIssues];
 
-  try {
-    for (;;) {
-      const ordered = currentQueue.find((o) => !handled.has(o.identifier));
-      if (ordered === undefined) {
-        break;
-      }
-      log.info(`Starting ${ordered.identifier}: ${ordered.title}`);
+  for (;;) {
+    const ordered = currentQueue.find((o) => !handled.has(o.identifier));
+    if (ordered === undefined) {
+      break;
+    }
+    log.info(`Starting ${ordered.identifier}: ${ordered.title}`);
 
-      let issueContent: LinearIssueContent;
-      try {
-        issueContent = await fetchIssueContentFn(linearCtx, ordered.id);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log.error(`Failed to fetch ${ordered.identifier} content: ${msg}`);
-        return {
-          completed,
-          flipped,
-          processed,
-          abortedAt: {
-            identifier: ordered.identifier,
-            reason: `fetch failed: ${msg}`,
+    let issueContent: LinearIssueContent;
+    try {
+      issueContent = await fetchIssueContentFn(linearCtx, ordered.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`Failed to fetch ${ordered.identifier} content: ${msg}`);
+      return {
+        completed,
+        flipped,
+        processed,
+        abortedAt: {
+          identifier: ordered.identifier,
+          reason: `fetch failed: ${msg}`,
+        },
+      };
+    }
+
+    // Transition the sub-issue to *In Progress* before any agent work runs.
+    // A failure here is an infra failure: the queue aborts without further
+    // Linear writes (matches the "infra FAIL → no label flip" rule).
+    try {
+      await transitionToInProgressFn(linearCtx, ordered.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        `Failed to transition ${ordered.identifier} to In Progress: ${msg}`
+      );
+      return {
+        completed,
+        flipped,
+        processed,
+        abortedAt: {
+          identifier: ordered.identifier,
+          reason: `transition to In Progress failed: ${msg}`,
+        },
+      };
+    }
+
+    const promptArgs = buildPromptArgs({
+      issue: issueContent,
+      parent:
+        root.kind === "prd" && parentContent !== undefined
+          ? { ...parentContent, identifier: root.identifier }
+          : undefined,
+      featureBranch: branch,
+      baseBranch,
+    });
+
+    const workingLogPath = buildLogPath({
+      repoRoot,
+      branch,
+      identifier: ordered.identifier,
+      role: "working",
+    });
+
+    let result: RunResult;
+    try {
+      result = await sandcastleRun({
+        name: "tide",
+        agent: claudeCode("claude-opus-4-7"),
+        // Each iteration runs in an ephemeral Iteration worktree
+        // beneath the Feature worktree. Sandcastle creates a temp
+        // branch + worktree + container, runs the agent, merges the
+        // iteration's commits into the Feature worktree's feature
+        // branch on sandbox close, and tears everything down.
+        sandbox: docker({
+          mounts: config.sandbox.mounts,
+          env: sandboxEnv,
+        }),
+        cwd: featureWorktreePath,
+        branchStrategy: { type: "merge-to-head" },
+        hooks: {
+          sandbox: {
+            onSandboxReady: config.hooks.onSandboxReady,
           },
-        };
-      }
-
-      // Transition the sub-issue to *In Progress* before any agent work runs.
-      // A failure here is an infra failure: the queue aborts without further
-      // Linear writes (matches the "infra FAIL → no label flip" rule).
-      try {
-        await transitionToInProgressFn(linearCtx, ordered.id);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log.error(
-          `Failed to transition ${ordered.identifier} to In Progress: ${msg}`
-        );
-        return {
-          completed,
-          flipped,
-          processed,
-          abortedAt: {
-            identifier: ordered.identifier,
-            reason: `transition to In Progress failed: ${msg}`,
-          },
-        };
-      }
-
-      const promptArgs = buildPromptArgs({
-        issue: issueContent,
-        parent:
-          root.kind === "prd" && parentContent !== undefined
-            ? { ...parentContent, identifier: root.identifier }
-            : undefined,
+        },
+        promptFile,
+        promptArgs,
+        maxIterations: 3,
+        logging: { type: "file", path: workingLogPath },
+        // Agent exit vocabulary: DONE for success, BLOCKED for graceful
+        // give-up. Sandcastle short-circuits on either; the host
+        // distinguishes them via `RunResult.completionSignal`.
+        completionSignal: [DONE_SIGNAL, BLOCKED_SIGNAL],
       });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`${ordered.identifier} threw: ${msg}`);
+      // The agent may have committed before the throw; those commits are
+      // real on disk via the bind mount. Push best-effort so partial work
+      // ships before the queue aborts. `git push` with no new commits is
+      // a no-op, so we don't gate on commit count here.
+      await pushBranchToOrigin(shellRunner, repoRoot, branch);
+      return {
+        completed,
+        flipped,
+        processed,
+        abortedAt: {
+          identifier: ordered.identifier,
+          reason: `run() threw: ${msg}`,
+        },
+      };
+    }
 
-      const workingLogPath = buildLogPath({
+    // Per ADR-0007: push after every working-agent iteration that
+    // produced commits, regardless of the iteration's classification
+    // (DONE, BLOCKED, or agent-FAIL). Push failure is warn-and-continue;
+    // Linear state is not touched by push failure.
+    if (result.commits.length > 0) {
+      await pushBranchToOrigin(shellRunner, repoRoot, branch);
+    }
+
+    const verdict = classifyRun(result);
+    if (verdict.kind === "blocked" || verdict.kind === "agent-fail") {
+      const reasonLabel = verdict.kind === "blocked" ? "BLOCKED" : "FAIL";
+      const detail = verdict.kind === "agent-fail" ? verdict.reason : undefined;
+      log.warn(
+        `${ordered.identifier} ${reasonLabel}${detail ? `: ${detail}` : ""} — running summarizer and flipping to ready-for-human`
+      );
+
+      // Step 1 (best-effort): run the summarizer and capture its final
+      // assistant message. On any failure, fall back to a short
+      // placeholder that cites the underlying error so the human knows
+      // tide tried and gave up — not that the agent's transcript was
+      // clean.
+      const summarizerKind: SummarizerPromptKind =
+        verdict.kind === "blocked" ? "blocked" : "fail";
+      const summarizerLogPath = buildLogPath({
         repoRoot,
         branch,
         identifier: ordered.identifier,
-        role: "working",
+        role:
+          summarizerKind === "blocked"
+            ? "summarizer-blocked"
+            : "summarizer-fail",
       });
-
-      let result: SandboxRunResult;
+      let commentBody: string;
       try {
-        result = await sandboxRun({
-          name: "tide",
-          agent: claudeCode("claude-opus-4-7"),
-          promptFile,
-          promptArgs,
-          maxIterations: 3,
-          logging: { type: "file", path: workingLogPath },
-          // Agent exit vocabulary: DONE for success, BLOCKED for graceful
-          // give-up. Sandcastle short-circuits on either; the host
-          // distinguishes them via `SandboxRunResult.completionSignal`.
-          completionSignal: [DONE_SIGNAL, BLOCKED_SIGNAL],
+        commentBody = await runSummarizer({
+          kind: summarizerKind,
+          workingAgentLogFilePath: result.logFilePath,
+          parentContent,
+          parentIdentifier: root.kind === "prd" ? root.identifier : undefined,
+          issueContent,
+          sandcastleRun,
+          readFinalAssistantMessage,
+          summarizerLogPath,
+          featureWorktreePath,
+          sandboxEnv,
+          config,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.error(`${ordered.identifier} threw: ${msg}`);
-        // The agent may have committed before the throw; those commits are
-        // real on disk via the bind mount. Push best-effort so partial work
-        // ships before the queue aborts. `git push` with no new commits is
-        // a no-op, so we don't gate on commit count here.
-        await pushBranchToOrigin(shellRunner, repoRoot, branch);
+        log.warn(
+          `Summarizer failed for ${ordered.identifier}: ${msg} — using fallback comment`
+        );
+        commentBody = buildFallbackComment(verdict.kind, detail, msg);
+      }
+
+      // Step 2: flip the label first (the queue-gating signal), then post
+      // the comment. A failure on either is an infra failure and aborts.
+      try {
+        await flipLabelFn(linearCtx, ordered.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(
+          `Failed to flip ${ordered.identifier} to ready-for-human: ${msg}`
+        );
         return {
           completed,
           flipped,
           processed,
           abortedAt: {
             identifier: ordered.identifier,
-            reason: `run() threw: ${msg}`,
+            reason: `label flip failed: ${msg}`,
           },
         };
       }
-
-      // Per ADR-0007: push after every working-agent iteration that
-      // produced commits, regardless of the iteration's classification
-      // (DONE, BLOCKED, or agent-FAIL). Push failure is warn-and-continue;
-      // Linear state is not touched by push failure.
-      if (result.commits.length > 0) {
-        await pushBranchToOrigin(shellRunner, repoRoot, branch);
+      try {
+        await postCommentFn(linearCtx, ordered.id, commentBody);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`Failed to post comment on ${ordered.identifier}: ${msg}`);
+        return {
+          completed,
+          flipped,
+          processed,
+          abortedAt: {
+            identifier: ordered.identifier,
+            reason: `comment post failed: ${msg}`,
+          },
+        };
       }
-
-      const verdict = classifyRun(result);
-      if (verdict.kind === "blocked" || verdict.kind === "agent-fail") {
-        const reasonLabel = verdict.kind === "blocked" ? "BLOCKED" : "FAIL";
-        const detail =
-          verdict.kind === "agent-fail" ? verdict.reason : undefined;
-        log.warn(
-          `${ordered.identifier} ${reasonLabel}${detail ? `: ${detail}` : ""} — running summarizer and flipping to ready-for-human`
-        );
-
-        // Step 1 (best-effort): run the summarizer and capture its final
-        // assistant message. On any failure, fall back to a short
-        // placeholder that cites the underlying error so the human knows
-        // tide tried and gave up — not that the agent's transcript was
-        // clean.
-        const summarizerKind: SummarizerPromptKind =
-          verdict.kind === "blocked" ? "blocked" : "fail";
-        const summarizerLogPath = buildLogPath({
-          repoRoot,
-          branch,
-          identifier: ordered.identifier,
-          role:
-            summarizerKind === "blocked"
-              ? "summarizer-blocked"
-              : "summarizer-fail",
-        });
-        let commentBody: string;
+      flipped++;
+      handled.add(ordered.identifier);
+      processed.push(ordered);
+    } else {
+      // DONE signalled and committed.
+      //
+      // PRD roots: the queued unit is a Sub-issue; transition it to *Done*
+      // host-side so the user sees real-time per-iteration progress in
+      // Linear (ADR-0005). A failure here is an infra failure: queue aborts.
+      //
+      // Standalone roots: the queued unit is the Standalone Issue itself.
+      // Skip the host-side Done transition — the Standalone Issue stays at
+      // *In Progress* and the CLI orchestration layer's post-submission
+      // hook transitions it to *In Review* once the PR is opened. This
+      // prevents the misleading-state case where the parent claims Done
+      // before review.
+      if (root.kind === "prd") {
         try {
-          commentBody = await runSummarizer({
-            kind: summarizerKind,
-            workingAgentLogFilePath: result.logFilePath,
-            parentContent,
-            parentIdentifier: root.kind === "prd" ? root.identifier : undefined,
-            issueContent,
-            sandboxRun,
-            readFinalAssistantMessage,
-            summarizerLogPath,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.warn(
-            `Summarizer failed for ${ordered.identifier}: ${msg} — using fallback comment`
-          );
-          commentBody = buildFallbackComment(verdict.kind, detail, msg);
-        }
-
-        // Step 2: flip the label first (the queue-gating signal), then post
-        // the comment. A failure on either is an infra failure and aborts.
-        try {
-          await flipLabelFn(linearCtx, ordered.id);
+          await transitionToDoneFn(linearCtx, ordered.id);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(
-            `Failed to flip ${ordered.identifier} to ready-for-human: ${msg}`
+            `Failed to transition ${ordered.identifier} to Done: ${msg}`
           );
           return {
             completed,
@@ -826,110 +898,54 @@ export async function runIssueQueue(
             processed,
             abortedAt: {
               identifier: ordered.identifier,
-              reason: `label flip failed: ${msg}`,
-            },
-          };
-        }
-        try {
-          await postCommentFn(linearCtx, ordered.id, commentBody);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.error(`Failed to post comment on ${ordered.identifier}: ${msg}`);
-          return {
-            completed,
-            flipped,
-            processed,
-            abortedAt: {
-              identifier: ordered.identifier,
-              reason: `comment post failed: ${msg}`,
-            },
-          };
-        }
-        flipped++;
-        handled.add(ordered.identifier);
-        processed.push(ordered);
-      } else {
-        // DONE signalled and committed.
-        //
-        // PRD roots: the queued unit is a Sub-issue; transition it to *Done*
-        // host-side so the user sees real-time per-iteration progress in
-        // Linear (ADR-0005). A failure here is an infra failure: queue aborts.
-        //
-        // Standalone roots: the queued unit is the Standalone Issue itself.
-        // Skip the host-side Done transition — the Standalone Issue stays at
-        // *In Progress* and the CLI orchestration layer's post-submission
-        // hook transitions it to *In Review* once the PR is opened. This
-        // prevents the misleading-state case where the parent claims Done
-        // before review.
-        if (root.kind === "prd") {
-          try {
-            await transitionToDoneFn(linearCtx, ordered.id);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log.error(
-              `Failed to transition ${ordered.identifier} to Done: ${msg}`
-            );
-            return {
-              completed,
-              flipped,
-              processed,
-              abortedAt: {
-                identifier: ordered.identifier,
-                reason: `transition to Done failed: ${msg}`,
-              },
-            };
-          }
-        }
-
-        completed++;
-        handled.add(ordered.identifier);
-        processed.push(ordered);
-        log.success(
-          `${ordered.identifier} done (${String(result.commits.length)} commit(s))`
-        );
-      }
-
-      // Iteration boundary (PRD roots only). Re-fetch the picked PRD's
-      // direct children, exclude already-handled identifiers, and rebuild
-      // the topo order — absorbing any Sub-issues the human added in
-      // Linear's UI mid-run. Standalone Issue roots have no children and no
-      // boundary. See ADR-0010.
-      if (root.kind === "prd") {
-        const outcome = await rebuildQueueAtBoundary({
-          linearCtx,
-          prdId: root.id,
-          repoName,
-          fetchSubIssues: fetchSubIssuesFn,
-          knownIdentifiers,
-        });
-        if (outcome.kind === "queue") {
-          currentQueue = outcome.queue;
-        } else if (outcome.kind === "fetch-failed") {
-          log.warn(
-            `fetchSubIssues failed mid-run: ${outcome.reason} — continuing with previous queue`
-          );
-          // Keep `currentQueue` unchanged; next boundary's call retries.
-        } else {
-          log.error(`Aborting after queue rebuild error: ${outcome.reason}`);
-          return {
-            completed,
-            flipped,
-            processed,
-            abortedAt: {
-              identifier: outcome.identifier,
-              reason: outcome.reason,
+              reason: `transition to Done failed: ${msg}`,
             },
           };
         }
       }
+
+      completed++;
+      handled.add(ordered.identifier);
+      processed.push(ordered);
+      log.success(
+        `${ordered.identifier} done (${String(result.commits.length)} commit(s))`
+      );
     }
 
-    return { completed, flipped, processed };
-  } finally {
-    if (sandbox !== undefined) {
-      await sandbox.close().catch(() => {
-        /* swallow close errors — they are best-effort cleanup */
+    // Iteration boundary (PRD roots only). Re-fetch the picked PRD's
+    // direct children, exclude already-handled identifiers, and rebuild
+    // the topo order — absorbing any Sub-issues the human added in
+    // Linear's UI mid-run. Standalone Issue roots have no children and no
+    // boundary. See ADR-0010.
+    if (root.kind === "prd") {
+      const outcome = await rebuildQueueAtBoundary({
+        linearCtx,
+        prdId: root.id,
+        repoName,
+        fetchSubIssues: fetchSubIssuesFn,
+        knownIdentifiers,
       });
+      if (outcome.kind === "queue") {
+        currentQueue = outcome.queue;
+      } else if (outcome.kind === "fetch-failed") {
+        log.warn(
+          `fetchSubIssues failed mid-run: ${outcome.reason} — continuing with previous queue`
+        );
+        // Keep `currentQueue` unchanged; next boundary's call retries.
+      } else {
+        log.error(`Aborting after queue rebuild error: ${outcome.reason}`);
+        return {
+          completed,
+          flipped,
+          processed,
+          abortedAt: {
+            identifier: outcome.identifier,
+            reason: outcome.reason,
+          },
+        };
+      }
     }
   }
+
+  return { completed, flipped, processed };
 }
