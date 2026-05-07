@@ -237,6 +237,11 @@ export interface RunPrTailStepOptions {
    * Issue roots. */
   subIssues: SubIssueRef[];
   repoRoot: string;
+  /** Path to the long-lived Feature worktree on the host. The PR-submission
+   * iteration runs directly inside it under sandcastle's `head` branch
+   * strategy. The host-side `gh pr list --head <branch>` and the rev-list
+   * gate continue to run from `repoRoot`. */
+  featureWorktreePath: string;
   config: TideConfig;
   sandboxEnv: Record<string, string>;
   completedCount: number;
@@ -327,6 +332,7 @@ export async function runPrTailStep(
       rootUrl: opts.rootUrl,
       subIssues: opts.subIssues,
       repoRoot: opts.repoRoot,
+      featureWorktreePath: opts.featureWorktreePath,
       config: opts.config,
       sandboxEnv: opts.sandboxEnv,
     });
@@ -650,6 +656,7 @@ export async function runQueueAfterPick(
     rootUrl: root.url,
     subIssues: subIssueRefs,
     repoRoot: opts.repoRoot,
+    featureWorktreePath: featureWorktree.worktreePath,
     config: opts.config,
     sandboxEnv: opts.sandboxEnv,
     completedCount: queueResult.completed,

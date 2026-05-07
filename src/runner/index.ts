@@ -56,8 +56,6 @@ import {
   claudeCode,
   type RunOptions,
   type RunResult,
-  type SandboxRunOptions,
-  type SandboxRunResult,
 } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { log } from "@clack/prompts";
@@ -113,18 +111,6 @@ export interface OrderedIssue {
 export type RunRoot =
   | { kind: "prd"; id: string; identifier: string }
   | { kind: "standalone" };
-
-/**
- * Test seam type: a function with the same shape as `sandbox.run(...)` from
- * `@ai-hero/sandcastle`. Retained for the PR-submission tail step, which
- * still uses the reusable-sandbox shape (`createSandbox` + `sandbox.run`).
- * The runner itself no longer accepts this seam — it uses `SandcastleRunFn`
- * (one `sandcastle.run(...)` call per agent invocation, with sandcastle
- * owning the iteration worktree's lifecycle).
- */
-export type SandboxRunFn = (
-  opts: SandboxRunOptions
-) => Promise<SandboxRunResult>;
 
 /**
  * Test seam type: a function with the same shape as the top-level

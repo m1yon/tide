@@ -9,8 +9,8 @@ import {
   type ShellRunner,
 } from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
-import type { SandboxRunOptions, SandboxRunResult } from "@ai-hero/sandcastle";
-import type { SandboxRunFn } from "../runner/index.ts";
+import type { RunOptions, RunResult } from "@ai-hero/sandcastle";
+import type { SandcastleRunFn } from "../runner/index.ts";
 
 interface ShellCall {
   cmd: string;
@@ -59,12 +59,13 @@ const baseConfig: TideConfig = {
 
 const baseGhRepo = { owner: "acme", repo: "widget" };
 
-const baseSandboxRun: SandboxRunFn = () =>
+const baseSandcastleRun: SandcastleRunFn = () =>
   Promise.resolve({
     iterations: [],
     stdout: "",
     commits: [],
-  } satisfies SandboxRunResult);
+    branch: "feature/per-32",
+  } satisfies RunResult);
 
 describe("resolveBaseBranch", () => {
   it("returns the trimmed branch name on success", async () => {
@@ -167,14 +168,15 @@ describe("runPrSubmission", () => {
       },
     ]);
 
-    let receivedRunOptions: SandboxRunOptions | undefined;
-    const sandboxRun: SandboxRunFn = (opts) => {
+    let receivedRunOptions: RunOptions | undefined;
+    const sandcastleRun: SandcastleRunFn = (opts) => {
       receivedRunOptions = opts;
       return Promise.resolve({
         iterations: [],
         stdout: "",
         commits: [],
-      } satisfies SandboxRunResult);
+        branch: "feature/per-32",
+      } satisfies RunResult);
     };
 
     const result = await runPrSubmission({
@@ -189,10 +191,11 @@ describe("runPrSubmission", () => {
         { number: 9, title: "Pre-flight clack confirm" },
       ],
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
       config: baseConfig,
       sandboxEnv: {},
       shellRunner: runner,
-      sandboxRun,
+      sandcastleRun,
     });
 
     expect(result).toEqual({
@@ -204,11 +207,13 @@ describe("runPrSubmission", () => {
     // per-iteration. Only `gh pr list` runs through the shell.
     expect(calls.every((c) => c.cmd !== "git")).toBe(true);
 
-    // The iteration was fired with the right shape. Branch + baseBranch are
-    // bound at `createSandbox` time, not on the run-options shape, so the
-    // run options no longer carry a `branchStrategy` field.
+    // The iteration was fired with the right shape. The PR-submission
+    // iteration runs directly inside the Feature worktree under sandcastle's
+    // `head` branch strategy — no per-call worktree, no merge step.
     expect(receivedRunOptions).toBeDefined();
     if (!receivedRunOptions) throw new Error("missing run options");
+    expect(receivedRunOptions.branchStrategy).toEqual({ type: "head" });
+    expect(receivedRunOptions.cwd).toBe("/repo/.tide/worktrees/feature-per-32");
     expect(receivedRunOptions.maxIterations).toBe(1);
     expect(receivedRunOptions.completionSignal).toEqual([
       "<promise>DONE</promise>",
@@ -289,10 +294,11 @@ describe("runPrSubmission", () => {
         rootUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
+        featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandboxRun: baseSandboxRun,
+        sandcastleRun: baseSandcastleRun,
       })
     );
     expect(err).toBeInstanceOf(Error);
@@ -302,7 +308,7 @@ describe("runPrSubmission", () => {
   it("wraps sandcastle thrown errors with a tide-prefixed message", async () => {
     const { runner } = buildShellRunner([]);
 
-    const sandboxRun: SandboxRunFn = () =>
+    const sandcastleRun: SandcastleRunFn = () =>
       Promise.reject(new Error("sandbox failed to start"));
 
     const err = await captureError(
@@ -315,10 +321,11 @@ describe("runPrSubmission", () => {
         rootUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
+        featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandboxRun,
+        sandcastleRun,
       })
     );
     expect(err).toBeInstanceOf(Error);

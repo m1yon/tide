@@ -815,6 +815,7 @@ describe("runPrTailStep", () => {
     rootUrl: "https://linear.app/acme/issue/MEC-123",
     subIssues: [{ number: 8, title: "Foundation tracer" }],
     repoRoot: "/repo",
+    featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
     config: baseConfig,
     sandboxEnv: {},
     completedCount: 3,
@@ -1787,6 +1788,7 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
 
     const createCalls: CreateWorktreeOptions[] = [];
     let capturedFeaturePath: string | undefined;
+    let capturedTailFeaturePath: string | undefined;
 
     await runQueueAfterPick({
       picked: prdRoot(picked),
@@ -1814,12 +1816,14 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
         capturedFeaturePath = opts.featureWorktreePath;
         return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
       },
-      runPrTailStep: () =>
-        Promise.resolve({
+      runPrTailStep: (opts) => {
+        capturedTailFeaturePath = opts.featureWorktreePath;
+        return Promise.resolve({
           outcome: { kind: "opted-out" },
           outroMessage: "x",
           exitCode: 0,
-        } satisfies PrTailStepResult),
+        } satisfies PrTailStepResult);
+      },
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(false),
       transitionRootToInProgress: () => Promise.resolve(),
@@ -1838,6 +1842,9 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
     expect(opts.cwd).toBe("/repo");
     // The handle's worktreePath is the value runIssueQueue receives.
     expect(capturedFeaturePath).toBe("/repo/.tide/worktrees/feature-eng-7");
+    // The same worktreePath flows into the PR-tail step so the PR-submission
+    // iteration runs inside the Feature worktree under `head` strategy.
+    expect(capturedTailFeaturePath).toBe("/repo/.tide/worktrees/feature-eng-7");
   });
 
   test("aborts cleanly when createWorktree fails (no queue run)", async () => {

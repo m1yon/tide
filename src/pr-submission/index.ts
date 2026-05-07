@@ -20,17 +20,15 @@
 
 import { spawn } from "node:child_process";
 import {
-  createSandbox as defaultCreateSandbox,
+  run as defaultSandcastleRun,
   claudeCode,
-  type CreateSandboxOptions,
-  type Sandbox,
-  type SandboxRunOptions,
+  type RunOptions,
 } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { GhRepo } from "../github/index.ts";
 import { repoTitlePrefix } from "../linear/index.ts";
-import { DONE_SIGNAL, type SandboxRunFn } from "../runner/index.ts";
+import { DONE_SIGNAL, type SandcastleRunFn } from "../runner/index.ts";
 
 export interface ShellResult {
   exitCode: number;
@@ -68,19 +66,25 @@ export interface RunPrSubmissionOptions {
   // scope its diff summary.
   subIssues: SubIssueRef[];
   repoRoot: string;
+  /**
+   * Path to the long-lived Feature worktree on the host. The PR-submission
+   * iteration runs directly inside it under sandcastle's `head` branch
+   * strategy — no per-call worktree is created. The host-side
+   * `gh pr list --head <branch>` verification step still runs from
+   * `repoRoot` (branch refs are repo-shared across worktrees).
+   */
+  featureWorktreePath: string;
   config: TideConfig;
   // Env map intended for the docker sandbox. Caller is responsible for
   // stripping LINEAR_API_KEY (matches the queue runner's contract).
   sandboxEnv: Record<string, string>;
   // Test seams.
   shellRunner?: ShellRunner;
-  /** Test seam — when provided, no real sandbox is created and the function
-   * is called in place of `sandbox.run(...)`. Defaults to a real
-   * `sandbox.run.bind(sandbox)` of a `Sandbox` built via `createSandbox`. */
-  sandboxRun?: SandboxRunFn;
-  /** Test seam — defaults to sandcastle's `createSandbox`. Only consulted
-   * when `sandboxRun` is not provided. */
-  createSandbox?: (opts: CreateSandboxOptions) => Promise<Sandbox>;
+  /** Test seam — defaults to sandcastle's top-level `run`. The PR-submission
+   * iteration is a single `sandcastle.run({ branchStrategy: 'head', cwd:
+   * featureWorktreePath, ... })` call that runs directly inside the Feature
+   * worktree (no per-call worktree, no merge step). */
+  sandcastleRun?: SandcastleRunFn;
 }
 
 export interface PrSubmissionResult {
@@ -431,16 +435,21 @@ export async function runPrSubmission(
     rootUrl,
     subIssues,
     repoRoot,
+    featureWorktreePath,
     config,
     sandboxEnv,
     shellRunner = defaultShellRunner,
   } = options;
-  const createSandboxFn = options.createSandbox ?? defaultCreateSandbox;
+  const sandcastleRun = options.sandcastleRun ?? defaultSandcastleRun;
 
   // Step 1: fire the sandcastle iteration with the bundled, interface-
   // emphasizing prompt. Inline `prompt` (not `promptFile`) — the template
-  // ships in tide source and is not user-editable. Uses the reusable-sandbox
-  // pattern (`createSandbox` + `sandbox.run`) to match the runner's API.
+  // ships in tide source and is not user-editable. Runs directly inside the
+  // Feature worktree under `head` branch strategy — bind-mounts the worktree
+  // into the container, no per-call worktree, no merge step. The Feature
+  // worktree is already on the feature branch with the right HEAD (every
+  // iteration's commits have already merged in via the runner's
+  // merge-to-head loop), and the agent's `gh pr create` produces no commits.
   const promptArgs = buildPrPromptArgs({
     rootIdentifier,
     rootTitle,
@@ -453,55 +462,36 @@ export async function runPrSubmission(
   });
   const prompt = applyPromptTemplate(PR_PROMPT_TEMPLATE, promptArgs);
 
-  // When tests inject `sandboxRun`, no real sandbox is created or closed.
-  // Production callers omit it and we build a one-shot sandbox here.
-  let sandbox: Sandbox | undefined;
-  let sandboxRun: SandboxRunFn;
-  if (options.sandboxRun !== undefined) {
-    sandboxRun = options.sandboxRun;
-  } else {
-    sandbox = await createSandboxFn({
-      branch,
-      baseBranch,
-      cwd: repoRoot,
+  try {
+    // The iteration produces no commit by design — its output is observable
+    // via `gh pr list` below, not via the RunResult, so we discard the
+    // result. Registering DONE_SIGNAL is informational: maxIterations=1
+    // already caps the loop, but matching the runner's exit vocabulary
+    // keeps the agent's prompt instructions consistent.
+    await sandcastleRun({
+      name: "tide-pr",
+      agent: claudeCode("claude-opus-4-7"),
       sandbox: docker({
         mounts: config.sandbox.mounts,
         env: sandboxEnv,
       }),
+      cwd: featureWorktreePath,
+      branchStrategy: { type: "head" },
       hooks: {
         sandbox: {
           onSandboxReady: config.hooks.onSandboxReady,
         },
       },
-    });
-    sandboxRun = sandbox.run.bind(sandbox);
-  }
-
-  try {
-    // The iteration produces no commit by design — its output is observable
-    // via `gh pr list` below, not via the SandboxRunResult, so we discard
-    // the result. Registering DONE_SIGNAL is informational: maxIterations=1
-    // already caps the loop, but matching the runner's exit vocabulary
-    // keeps the agent's prompt instructions consistent.
-    await sandboxRun({
-      name: "tide-pr",
-      agent: claudeCode("claude-opus-4-7"),
       prompt,
       maxIterations: 1,
       logging: { type: "stdout" },
       completionSignal: [DONE_SIGNAL],
-    } satisfies SandboxRunOptions);
+    } satisfies RunOptions);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`tide: PR submission iteration threw: ${msg}`, {
       cause: err,
     });
-  } finally {
-    if (sandbox !== undefined) {
-      await sandbox.close().catch(() => {
-        /* swallow close errors — best-effort cleanup */
-      });
-    }
   }
 
   // Step 2: verify host-side that a PR now exists for the branch.
