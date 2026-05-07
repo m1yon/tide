@@ -13,6 +13,7 @@ import {
   pickWorkflowStateByType,
   postComment,
   provisionInReviewState,
+  repoTitlePrefix,
   setupLabels,
   transitionToDone,
   transitionToInProgress,
@@ -171,6 +172,23 @@ describe("linear.setupLabels", () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/ready-for-agent/);
+  });
+});
+
+describe("linear.repoTitlePrefix", () => {
+  test("renders the canonical `[<repoName>] ` form (open-bracket, repo, close-bracket, single space)", () => {
+    expect(repoTitlePrefix("tide")).toBe("[tide] ");
+  });
+
+  test("trailing space is exact — no whitespace tolerance inside the brackets either", () => {
+    // Exact byte form is the contract (ADR-0012). A regression that strips
+    // the trailing space would silently match a `[tide]bug` title; a
+    // regression that inserts whitespace inside would silently fail to
+    // match `[tide] bug`.
+    const p = repoTitlePrefix("tide");
+    expect(p.endsWith(" ")).toBe(true);
+    expect(p).not.toMatch(/\[\s/);
+    expect(p).not.toMatch(/\s\]/);
   });
 });
 
@@ -368,7 +386,7 @@ describe("linear.listPRDs", () => {
       childCountsByParent: {},
     });
 
-    await listPRDs(ctx, stub.client);
+    await listPRDs(ctx, "tide", stub.client);
 
     // First `issues` call is the PRD list.
     const filter = stub.issuesFilters[0];
@@ -430,7 +448,7 @@ describe("linear.listPRDs", () => {
       },
     });
 
-    const prds = await listPRDs(ctx, stub.client);
+    const prds = await listPRDs(ctx, "tide", stub.client);
 
     expect(prds.map((p) => p.identifier)).toEqual(["ENG-1"]);
   });
@@ -472,7 +490,7 @@ describe("linear.listPRDs", () => {
       },
     });
 
-    const prds = await listPRDs(ctx, stub.client);
+    const prds = await listPRDs(ctx, "tide", stub.client);
 
     expect(prds).toHaveLength(2);
     const a = prds[0];
@@ -512,7 +530,7 @@ describe("linear.listPRDs", () => {
       },
     });
 
-    await listPRDs(ctx, stub.client);
+    await listPRDs(ctx, "tide", stub.client);
 
     // The first issues call is the PRD list; subsequent calls are child counts.
     const childCalls = stub.issuesFilters.slice(1);
@@ -531,7 +549,7 @@ describe("linear.listPRDs", () => {
     const stub = buildListPRDsStub({ knownTeamKeys: ["OTHER"] });
     let caught: unknown = null;
     try {
-      await listPRDs(ctx, stub.client);
+      await listPRDs(ctx, "tide", stub.client);
     } catch (err) {
       caught = err;
     }
@@ -541,7 +559,7 @@ describe("linear.listPRDs", () => {
 
   test("returns an empty list when no PRDs match", async () => {
     const stub = buildListPRDsStub({ prdNodes: [] });
-    const prds = await listPRDs(ctx, stub.client);
+    const prds = await listPRDs(ctx, "tide", stub.client);
     expect(prds).toEqual([]);
   });
 
@@ -561,8 +579,47 @@ describe("linear.listPRDs", () => {
       states: [],
       childCountsByParent: { "issue-x": { "ready-for-agent": 1 } },
     });
-    const prds = await listPRDs(ctx, stub.client);
+    const prds = await listPRDs(ctx, "tide", stub.client);
     expect(prds[0]?.state).toBe("");
+  });
+
+  test("applies the `[<repoName>] ` title-prefix scope filter (ADR-0012)", async () => {
+    // The PRD list call must filter by `title.startsWith("[<repoName>] ")` so
+    // wrong-repo and unprefixed PRDs are invisible to the picker, the queue
+    // build, and the queue rebuild. Exact form: open-bracket, repo name,
+    // close-bracket, single space — no whitespace tolerance.
+    const stub = buildListPRDsStub();
+    await listPRDs(ctx, "tide", stub.client);
+    expect(stub.issuesFilters[0]?.title?.startsWith).toBe("[tide] ");
+  });
+
+  test("title-prefix filter only applies to the PRD list, not the child-count queries", async () => {
+    // The child-count queries are scoped by parent.id.eq, not by team — they
+    // count direct children of the already-selected PRD. Re-applying the
+    // prefix filter there would silently drop valid sub-issue counts, which
+    // is the wrong invariant. The Sub-issue list call (`fetchSubIssues`) has
+    // its own filter — see those tests.
+    const stub = buildListPRDsStub({
+      prdNodes: [
+        {
+          id: "issue-A",
+          identifier: "ENG-7",
+          title: "x",
+          stateId: undefined,
+          branchName: "b",
+          url: "u",
+          updatedAt: new Date(0),
+        },
+      ],
+      childCountsByParent: {
+        "issue-A": { "ready-for-agent": 1, "ready-for-human": 1 },
+      },
+    });
+    await listPRDs(ctx, "tide", stub.client);
+    const childCalls = stub.issuesFilters.slice(1);
+    for (const f of childCalls) {
+      expect(f.title).toBeUndefined();
+    }
   });
 });
 
@@ -616,7 +673,7 @@ describe("linear.listStandaloneIssues", () => {
   test("queries for ready-for-agent issues with no parent and no `prd` label, in non-terminal states", async () => {
     const stub = buildListStandaloneStub();
 
-    await listStandaloneIssues(ctx, stub.client);
+    await listStandaloneIssues(ctx, "tide", stub.client);
 
     const filter = stub.issuesFilters[0];
     expect(filter).toBeDefined();
@@ -676,7 +733,7 @@ describe("linear.listStandaloneIssues", () => {
       ],
     });
 
-    const issues = await listStandaloneIssues(ctx, stub.client);
+    const issues = await listStandaloneIssues(ctx, "tide", stub.client);
 
     expect(issues).toHaveLength(1);
     const a = issues[0];
@@ -691,7 +748,7 @@ describe("linear.listStandaloneIssues", () => {
 
   test("returns an empty list when no issues match", async () => {
     const stub = buildListStandaloneStub({ issueNodes: [] });
-    const issues = await listStandaloneIssues(ctx, stub.client);
+    const issues = await listStandaloneIssues(ctx, "tide", stub.client);
     expect(issues).toEqual([]);
   });
 
@@ -710,7 +767,7 @@ describe("linear.listStandaloneIssues", () => {
       ],
       states: [],
     });
-    const issues = await listStandaloneIssues(ctx, stub.client);
+    const issues = await listStandaloneIssues(ctx, "tide", stub.client);
     expect(issues[0]?.state).toBe("");
   });
 
@@ -718,12 +775,21 @@ describe("linear.listStandaloneIssues", () => {
     const stub = buildListStandaloneStub({ knownTeamKeys: ["OTHER"] });
     let caught: unknown = null;
     try {
-      await listStandaloneIssues(ctx, stub.client);
+      await listStandaloneIssues(ctx, "tide", stub.client);
     } catch (err) {
       caught = err;
     }
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/team with key "ENG" not found/);
+  });
+
+  test("applies the `[<repoName>] ` title-prefix scope filter (ADR-0012)", async () => {
+    // Mirrors the listPRDs filter: wrong-repo and unprefixed Standalone
+    // Issues are invisible. Exact form: open-bracket, repo name,
+    // close-bracket, single space.
+    const stub = buildListStandaloneStub();
+    await listStandaloneIssues(ctx, "tide", stub.client);
+    expect(stub.issuesFilters[0]?.title?.startsWith).toBe("[tide] ");
   });
 });
 
@@ -782,7 +848,7 @@ describe("linear.fetchSubIssues", () => {
       },
     }));
 
-    const subs = await fetchSubIssues(ctx, "prd-uuid", stub.request);
+    const subs = await fetchSubIssues(ctx, "prd-uuid", "tide", stub.request);
 
     expect(subs).toHaveLength(2);
     const a = subs[0];
@@ -808,17 +874,20 @@ describe("linear.fetchSubIssues", () => {
       issue: { children: { nodes: [] } },
     }));
 
-    await fetchSubIssues(ctx, "the-prd-uuid", stub.request);
+    await fetchSubIssues(ctx, "the-prd-uuid", "tide", stub.request);
 
     expect(stub.calls).toHaveLength(1);
-    expect(stub.calls[0]?.variables).toEqual({ id: "the-prd-uuid" });
+    expect(stub.calls[0]?.variables).toEqual({
+      id: "the-prd-uuid",
+      filter: { title: { startsWith: "[tide] " } },
+    });
   });
 
   test("returns an empty list when the PRD has no children", async () => {
     const stub = makeGqlStub(() => ({
       issue: { children: { nodes: [] } },
     }));
-    const subs = await fetchSubIssues(ctx, "lonely-prd", stub.request);
+    const subs = await fetchSubIssues(ctx, "lonely-prd", "tide", stub.request);
     expect(subs).toEqual([]);
   });
 
@@ -826,7 +895,7 @@ describe("linear.fetchSubIssues", () => {
     const stub = makeGqlStub(() => ({ issue: null }));
     let caught: unknown = null;
     try {
-      await fetchSubIssues(ctx, "missing-uuid", stub.request);
+      await fetchSubIssues(ctx, "missing-uuid", "tide", stub.request);
     } catch (err) {
       caught = err;
     }
@@ -834,6 +903,30 @@ describe("linear.fetchSubIssues", () => {
     expect((caught as Error).message).toMatch(
       /PRD with id "missing-uuid" not found/
     );
+  });
+
+  test("applies the `[<repoName>] ` title-prefix scope filter via the children's `filter` arg (ADR-0012)", async () => {
+    // The Sub-issue fetch (used both at initial queue build and at every
+    // iteration boundary by the queue rebuild) must filter by
+    // `title.startsWith("[<repoName>] ")` so a mistitled or wrong-repo
+    // sub-issue under a `[<repoName>] ` PRD is not queued and is not
+    // absorbed by the rebuild.
+    const stub = makeGqlStub(() => ({
+      issue: { children: { nodes: [] } },
+    }));
+
+    await fetchSubIssues(ctx, "prd-uuid", "tide", stub.request);
+
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]?.variables).toEqual({
+      id: "prd-uuid",
+      filter: { title: { startsWith: "[tide] " } },
+    });
+    // The query body must also accept a `$filter: IssueFilter` variable and
+    // pass it through to `children(... filter: $filter)`. Verify the literal
+    // shape so a regression on the GraphQL document is caught here.
+    expect(stub.calls[0]?.query).toMatch(/\$filter:\s*IssueFilter/);
+    expect(stub.calls[0]?.query).toMatch(/children\([^)]*filter:\s*\$filter/);
   });
 
   test("falls back gracefully when state is null", async () => {
@@ -853,7 +946,7 @@ describe("linear.fetchSubIssues", () => {
         },
       },
     }));
-    const subs = await fetchSubIssues(ctx, "prd", stub.request);
+    const subs = await fetchSubIssues(ctx, "prd", "tide", stub.request);
     expect(subs[0]?.state).toBe("");
     expect(subs[0]?.stateType).toBe("");
   });
