@@ -83,6 +83,25 @@ import {
 
 const READY_FOR_HUMAN = "ready-for-human";
 
+/**
+ * Build the user-facing message tide prints when a Linear list query
+ * returns zero issues for the working repo. Names the repo and surfaces
+ * the two recovery moves so an empty picker / queue is never silently
+ * confusing (ADR-0012).
+ */
+function emptyListMessage(
+  kind: "PRD" | "Standalone Issue" | "sub-issue" | "root",
+  repoName: string
+): string {
+  const noun = kind === "root" ? "PRD or Standalone Issue" : kind;
+  return (
+    `No ${noun}(s) for repo "${repoName}". ` +
+    `Tide filters Linear titles by the \`[${repoName}] \` prefix. ` +
+    `Either retitle existing Linear issues to start with that prefix, ` +
+    `or create one with the triage / to-prd / to-issues skill.`
+  );
+}
+
 export { buildOrderedQueue };
 export type { BuildOrderedQueueResult, OrderedSubIssue };
 
@@ -98,9 +117,12 @@ export interface RunOptions {
   /** gh-token resolver. Tests stub this to avoid spawning `gh`. */
   getGhToken?: (options: GetGhTokenOptions) => Promise<string>;
   /** Linear PRD list fetcher. Tests stub this to avoid hitting Linear. */
-  listPRDs?: (ctx: LinearContext) => Promise<PRD[]>;
+  listPRDs?: (ctx: LinearContext, repoName: string) => Promise<PRD[]>;
   /** Linear Standalone Issue list fetcher. Tests stub this. */
-  listStandaloneIssues?: (ctx: LinearContext) => Promise<StandaloneIssue[]>;
+  listStandaloneIssues?: (
+    ctx: LinearContext,
+    repoName: string
+  ) => Promise<StandaloneIssue[]>;
   /**
    * Linear `"In Review"` state preflight assertion. Tests stub this to
    * avoid hitting Linear. Defaults to `linear.assertInReviewStatePresent`.
@@ -135,8 +157,13 @@ export interface RunQueueAfterPickOptions {
   sandboxEnv: Record<string, string>;
   /** Test seam — defaults to `linear.fetchSubIssues`. Used both to build
    * the queue for PRD roots and to validate the "no children" rule for
-   * Standalone Issue roots. */
-  fetchSubIssues?: (ctx: LinearContext, issueId: string) => Promise<SubIssue[]>;
+   * Standalone Issue roots. The `repoName` argument applies the repo-prefix
+   * scope filter from ADR-0012. */
+  fetchSubIssues?: (
+    ctx: LinearContext,
+    issueId: string,
+    repoName: string
+  ) => Promise<SubIssue[]>;
   /** Test seam — defaults to the runner module's `runIssueQueue`. */
   runIssueQueue?: (opts: RunIssueQueueOptions) => Promise<RunIssueQueueResult>;
   /** Test seam — defaults to the in-module `runPrTailStep`. */
@@ -380,7 +407,11 @@ export async function runQueueAfterPick(
     subSpin.start("Fetching sub-issues from Linear");
     let subIssues: SubIssue[];
     try {
-      subIssues = await fetchSubIssuesFn(opts.linearCtx, root.id);
+      subIssues = await fetchSubIssuesFn(
+        opts.linearCtx,
+        root.id,
+        opts.ghRepo.repo
+      );
     } catch (err) {
       subSpin.stop("Linear sub-issue fetch failed");
       const msg = err instanceof Error ? err.message : String(err);
@@ -389,6 +420,10 @@ export async function runQueueAfterPick(
       return 1;
     }
     subSpin.stop(`Fetched ${String(subIssues.length)} sub-issue(s)`);
+
+    if (subIssues.length === 0) {
+      log.warn(emptyListMessage("sub-issue", opts.ghRepo.repo));
+    }
 
     const queue = buildOrderedQueue(subIssues);
     if (queue.kind === "error") {
@@ -450,7 +485,11 @@ export async function runQueueAfterPick(
     childSpin.start("Verifying Standalone Issue has no Linear children");
     let children: SubIssue[];
     try {
-      children = await fetchSubIssuesFn(opts.linearCtx, root.id);
+      children = await fetchSubIssuesFn(
+        opts.linearCtx,
+        root.id,
+        opts.ghRepo.repo
+      );
     } catch (err) {
       childSpin.stop("Linear child fetch failed");
       const msg = err instanceof Error ? err.message : String(err);
@@ -497,6 +536,7 @@ export async function runQueueAfterPick(
     repoRoot: opts.repoRoot,
     config: opts.config,
     sandboxEnv: opts.sandboxEnv,
+    repoName: opts.ghRepo.repo,
   });
 
   if (queueResult.abortedAt) {
@@ -735,15 +775,17 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
 
   intro("tide run");
 
-  // Fetch PRDs and Standalone Issues in parallel.
+  // Fetch PRDs and Standalone Issues in parallel. Both list calls apply the
+  // `[<repoName>] ` title-prefix scope filter (ADR-0012) — wrong-repo and
+  // unprefixed issues are invisible.
   const fetchSpin = spinner();
   fetchSpin.start("Fetching PRDs and Standalone Issues from Linear");
   let prds: PRD[];
   let standaloneIssues: StandaloneIssue[];
   try {
     [prds, standaloneIssues] = await Promise.all([
-      listPRDsFn(linearCtx),
-      listStandaloneIssuesFn(linearCtx),
+      listPRDsFn(linearCtx, ghIdentity.repo),
+      listStandaloneIssuesFn(linearCtx, ghIdentity.repo),
     ]);
   } catch (err) {
     fetchSpin.stop("Linear fetch failed");
@@ -755,10 +797,14 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     `Fetched ${String(prds.length)} PRD(s), ${String(standaloneIssues.length)} Standalone Issue(s)`
   );
 
+  if (prds.length === 0) {
+    log.warn(emptyListMessage("PRD", ghIdentity.repo));
+  }
+  if (standaloneIssues.length === 0) {
+    log.warn(emptyListMessage("Standalone Issue", ghIdentity.repo));
+  }
   if (prds.length === 0 && standaloneIssues.length === 0) {
-    outro(
-      "No roots to run. Author a PRD with `ready-for-agent` sub-issues, or a Standalone Issue with the `ready-for-agent` label, in Linear."
-    );
+    outro(emptyListMessage("root", ghIdentity.repo));
     return 0;
   }
 

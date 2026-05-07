@@ -118,6 +118,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => {
         events.push("fetchContent");
@@ -168,6 +169,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () =>
         Promise.resolve(
           asSubIssues([
@@ -281,6 +283,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () =>
         Promise.resolve(
           asSubIssues([
@@ -382,6 +385,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -417,6 +421,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => {
@@ -481,6 +486,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => {
@@ -544,6 +550,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -594,6 +601,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -648,6 +656,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () =>
         Promise.resolve(
           asSubIssues([
@@ -711,6 +720,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => {
@@ -745,6 +755,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () =>
         Promise.resolve(
           asSubIssues([
@@ -796,6 +807,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: (_ctx, issueId) => {
@@ -827,6 +839,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () =>
         Promise.resolve(makeIssueContent({ identifier: "ENG-7" })),
@@ -867,6 +880,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -899,6 +913,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -957,6 +972,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -984,6 +1000,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -1032,6 +1049,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -1071,6 +1089,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () =>
         Promise.resolve(
           asSubIssues([
@@ -1128,6 +1147,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchIssueContent: () => {
         events.push("fetchContent");
         return Promise.resolve(makeIssueContent({ identifier: "ENG-7" }));
@@ -1172,6 +1192,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: (_ctx, issueId) => {
         events.push(`inProgress:${issueId}`);
@@ -1233,6 +1254,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
@@ -1263,6 +1285,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () =>
         Promise.resolve(
           asSubIssues([
@@ -1302,6 +1325,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCount += 1;
         // After iteration 1, the human added ENG-2 in Linear's UI.
@@ -1374,6 +1398,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCount += 1;
         if (fetchCount === 1) {
@@ -1450,6 +1475,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCount += 1;
         if (fetchCount === 1) {
@@ -1547,6 +1573,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCount += 1;
         // After iteration 1: ENG-2 has acquired a blockedBy that points to
@@ -1611,6 +1638,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCount += 1;
         if (fetchCount === 1) {
@@ -1657,6 +1685,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCount += 1;
         if (fetchCount === 1) {
@@ -1706,6 +1735,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCalls += 1;
         return Promise.resolve([]);
@@ -1736,6 +1766,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      repoName: "tide",
       fetchSubIssues: () => {
         fetchCount += 1;
         if (fetchCount === 1) {
@@ -1795,5 +1826,49 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       "ENG-1",
       "ENG-2",
     ]);
+  });
+
+  test("PRD root: every iteration-boundary fetchSubIssues call receives the runner's repoName (ADR-0012)", async () => {
+    // The mid-run queue rebuild must apply the same `[<repoName>] `
+    // title-prefix scope filter as the initial queue build — wrong-repo
+    // and unprefixed Sub-issues are invisible to both, and a mistitled
+    // sub-issue is never absorbed by the rebuild.
+    const fetchCalls: { prdId: string; repoName: string }[] = [];
+
+    await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      repoName: "widget",
+      fetchSubIssues: (_ctx, prdId, repoName) => {
+        fetchCalls.push({ prdId, repoName });
+        return Promise.resolve(
+          asSubIssues([
+            makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+            makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+          ])
+        );
+      },
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    // Two iterations → two boundaries → two rebuild fetches. Each must
+    // carry the runner's `repoName` argument verbatim.
+    expect(fetchCalls).toHaveLength(2);
+    for (const c of fetchCalls) {
+      expect(c.prdId).toBe("uuid-prd");
+      expect(c.repoName).toBe("widget");
+    }
   });
 });

@@ -1,14 +1,17 @@
 // Linear SDK facade for the Linear-native flow. Operations:
-//   - listPRDs(ctx): list every issue on the configured team that carries
-//     the `prd` label and has at least one direct sub-issue carrying
+//   - listPRDs(ctx, repoName): list every issue on the configured team that
+//     carries the `prd` label, whose title starts with the `[<repoName>] `
+//     prefix, and has at least one direct sub-issue carrying
 //     `ready-for-agent`, in a non-terminal workflow state. Each entry
 //     carries the count of its direct sub-issues split by
 //     `ready-for-agent` / `ready-for-human` label.
-//   - listStandaloneIssues(ctx): list every issue on the configured team
-//     that carries `ready-for-agent`, has no Linear parent, and does not
-//     carry the `prd` label, in a non-terminal workflow state.
-//   - fetchSubIssues(ctx, prdId): direct Linear children of a given PRD, with
-//     identifier, title, workflow state, label set, and blockedBy relations.
+//   - listStandaloneIssues(ctx, repoName): list every issue on the
+//     configured team whose title starts with `[<repoName>] `, that
+//     carries `ready-for-agent`, has no Linear parent, and does not carry
+//     the `prd` label, in a non-terminal workflow state.
+//   - fetchSubIssues(ctx, prdId, repoName): direct Linear children of a
+//     given PRD whose titles start with `[<repoName>] `, with identifier,
+//     title, workflow state, label set, and blockedBy relations.
 //   - fetchIssueContent(ctx, issueId): the issue's description (markdown
 //     body) and the bodies of its comments. Used to hydrate per-iteration
 //     prompt args.
@@ -25,6 +28,13 @@
 //
 // Workflow-state filtering uses `state.type` (not name) so per-team renames
 // of "In Progress" / "Done" don't slip terminal issues through.
+//
+// The repo prefix (`[<repoName>] ` — open-bracket, repo name, close-bracket,
+// single space) on Linear titles is the scope filter that lets one Linear
+// team back many repos (ADR-0012). The three list/fetch functions consume
+// it as a server-side `title.startsWith` clause; setup/doctor operations
+// (label provisioning, workflow-state checks) are repo-agnostic and don't
+// need it.
 //
 // Credentials: `apiKey` is passed in (loaded from `<repoRoot>/.tide/.env` by
 // the caller). The team key is also injected so this module is repo-agnostic.
@@ -162,6 +172,15 @@ export function pickWorkflowStateByName(
 }
 
 /**
+ * Build the `[<repoName>] ` title prefix tide filters Linear queries by
+ * (ADR-0012). Exact form: open-bracket, repo name, close-bracket, single
+ * space — no whitespace tolerance inside the brackets.
+ */
+export function repoTitlePrefix(repoName: string): string {
+  return `[${repoName}] `;
+}
+
+/**
  * Filter shape consumed by `listPRDs` via the SDK's `issues` method. The
  * production caller passes the real `LinearClient`; tests pass a hand-rolled
  * stub matching the same shape.
@@ -172,6 +191,7 @@ export interface ListPRDsIssueFilter {
   labels?: { name: { eq: string } };
   and?: ListPRDsIssueFilter[];
   state?: { type: { in: string[] } };
+  title?: { startsWith: string };
 }
 
 /**
@@ -189,6 +209,7 @@ export interface ListStandaloneIssuesFilter {
     | { some: { name: { eq: string } } }
     | { every: { name: { neq: string } } };
   and?: ListStandaloneIssuesFilter[];
+  title?: { startsWith: string };
 }
 
 interface ListPRDsIssueNode {
@@ -223,20 +244,24 @@ export interface ListPRDsClient {
 }
 
 /**
- * List every PRD (issue tagged with `prd` on the configured team, in a
- * non-terminal workflow state, with at least one direct sub-issue carrying
- * `ready-for-agent`) ordered by `updatedAt` desc. Each PRD carries the count
- * of its direct sub-issues split by `ready-for-agent` / `ready-for-human`
- * label.
+ * List every PRD (issue tagged with `prd` on the configured team, whose
+ * title starts with `[<repoName>] `, in a non-terminal workflow state,
+ * with at least one direct sub-issue carrying `ready-for-agent`) ordered
+ * by `updatedAt` desc. Each PRD carries the count of its direct sub-issues
+ * split by `ready-for-agent` / `ready-for-human` label.
  *
  * Standalone PRDs — `prd`-labeled issues with zero `ready-for-agent`
  * direct children — are filtered out so they don't clutter the picker.
+ *
+ * The `[<repoName>] ` prefix is the team↔repo scope filter from ADR-0012.
+ * Wrong-repo and unprefixed PRDs are invisible.
  *
  * `_client` is a test seam — production callers omit it and the real
  * `LinearClient` is constructed from `ctx.apiKey`.
  */
 export async function listPRDs(
   ctx: LinearContext,
+  repoName: string,
   _client?: ListPRDsClient
 ): Promise<PRD[]> {
   const c: ListPRDsClient = _client ?? client(ctx.apiKey);
@@ -248,6 +273,7 @@ export async function listPRDs(
         team: { id: { eq: teamId } },
         and: [{ labels: { name: { eq: PRD_LABEL } } }],
         state: { type: { in: [...NON_TERMINAL_STATE_TYPES] } },
+        title: { startsWith: repoTitlePrefix(repoName) },
       },
       orderBy: PaginationOrderBy.UpdatedAt,
     }),
@@ -323,14 +349,19 @@ export interface ListStandaloneIssuesClient {
 
 /**
  * List every Standalone Issue (issue tagged with `ready-for-agent` on the
- * configured team, with no Linear parent, not carrying the `prd` label, in
- * a non-terminal workflow state) ordered by `updatedAt` desc.
+ * configured team, whose title starts with `[<repoName>] `, with no Linear
+ * parent, not carrying the `prd` label, in a non-terminal workflow state)
+ * ordered by `updatedAt` desc.
+ *
+ * The `[<repoName>] ` prefix is the team↔repo scope filter from ADR-0012.
+ * Wrong-repo and unprefixed Standalone Issues are invisible.
  *
  * `_client` is a test seam — production callers omit it and the real
  * `LinearClient` is constructed from `ctx.apiKey`.
  */
 export async function listStandaloneIssues(
   ctx: LinearContext,
+  repoName: string,
   _client?: ListStandaloneIssuesClient
 ): Promise<StandaloneIssue[]> {
   const c: ListStandaloneIssuesClient = _client ?? client(ctx.apiKey);
@@ -346,6 +377,7 @@ export async function listStandaloneIssues(
           { labels: { some: { name: { eq: READY_FOR_AGENT_LABEL } } } },
           { labels: { every: { name: { neq: PRD_LABEL } } } },
         ],
+        title: { startsWith: repoTitlePrefix(repoName) },
       },
       orderBy: PaginationOrderBy.UpdatedAt,
     }),
@@ -649,10 +681,10 @@ export interface SubIssue {
 }
 
 const SUB_ISSUES_QUERY = /* GraphQL */ `
-  query TideSubIssues($id: String!) {
+  query TideSubIssues($id: String!, $filter: IssueFilter) {
     issue(id: $id) {
       id
-      children(first: 250) {
+      children(first: 250, filter: $filter) {
         nodes {
           id
           identifier
@@ -695,11 +727,17 @@ interface SubIssueGqlNode {
 }
 
 /**
- * Fetch the direct Linear children of `prdId` (an issue UUID). Each entry
- * carries the data the runner needs to topo-sort and dispatch: identifier,
- * title, workflow-state name + type, label names, and `blockedBy`
- * identifiers. Only relations of type `"blocks"` populate `blockedBy`;
- * `"related"` and `"duplicate"` are ignored.
+ * Fetch the direct Linear children of `prdId` (an issue UUID) whose titles
+ * start with `[<repoName>] `. Each entry carries the data the runner needs
+ * to topo-sort and dispatch: identifier, title, workflow-state name + type,
+ * label names, and `blockedBy` identifiers. Only relations of type
+ * `"blocks"` populate `blockedBy`; `"related"` and `"duplicate"` are
+ * ignored.
+ *
+ * The `[<repoName>] ` prefix is the team↔repo scope filter from ADR-0012,
+ * applied at every iteration boundary's queue rebuild — wrong-repo and
+ * unprefixed Sub-issues are invisible to both the initial queue build and
+ * the rebuild.
  *
  * Throws when the PRD id does not resolve. Sub-issues whose blocker
  * relation lacks an issue payload (deleted source) are skipped.
@@ -709,12 +747,16 @@ interface SubIssueGqlNode {
 export async function fetchSubIssues(
   ctx: LinearContext,
   prdId: string,
+  repoName: string,
   _request?: LinearGqlRequest
 ): Promise<SubIssue[]> {
   const request = _request ?? rawRequest(ctx.apiKey);
   const data = await request<{
     issue: { children: { nodes: SubIssueGqlNode[] } } | null;
-  }>(SUB_ISSUES_QUERY, { id: prdId });
+  }>(SUB_ISSUES_QUERY, {
+    id: prdId,
+    filter: { title: { startsWith: repoTitlePrefix(repoName) } },
+  });
   if (!data.issue) {
     throw new Error(`Linear PRD with id "${prdId}" not found.`);
   }

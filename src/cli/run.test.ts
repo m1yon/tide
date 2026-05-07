@@ -60,11 +60,13 @@ function makeGhToken(log: CallLog) {
 interface ListPRDsStub {
   prds: PRD[];
   calls: LinearContext[];
+  repoNames: string[];
 }
 
 function makeListPRDs(stub: ListPRDsStub, log: CallLog) {
-  return (ctx: LinearContext): Promise<PRD[]> => {
+  return (ctx: LinearContext, repoName: string): Promise<PRD[]> => {
     stub.calls.push(ctx);
+    stub.repoNames.push(repoName);
     log.events.push("listPRDs");
     return Promise.resolve(stub.prds);
   };
@@ -221,7 +223,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("invokes build before fetching Linear PRDs", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     const code = await tideRun({
       repoRoot,
@@ -248,7 +250,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("build receives the resolved repoRoot and the same stdout/stderr sinks", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     await tideRun({
       repoRoot,
@@ -273,7 +275,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("build failure short-circuits with the build's exit code; PRD fetch never runs", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 2, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     const code = await tideRun({
       repoRoot,
@@ -296,7 +298,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("empty PRD and Standalone Issue lists exit cleanly without invoking the selector", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
     const pickStub: PickRootStub = { pickIndex: 0, calls: 0 };
 
     const code = await tideRun({
@@ -317,6 +319,79 @@ describe("tide run — early gates and Linear PRD selector", () => {
     expect(pickStub.calls).toBe(0);
   });
 
+  test("threads the gh-identity repo name into both Linear list calls (ADR-0012)", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
+    const standaloneRepoNames: string[] = [];
+
+    await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: (_ctx, repoName) => {
+        standaloneRepoNames.push(repoName);
+        return Promise.resolve([]);
+      },
+      assertInReviewStatePresent: () => Promise.resolve(),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    // makeGhIdentity returns { owner: "m1yon", repo: "tide" }; both list
+    // calls must receive that exact repo name as the title-prefix scope.
+    expect(listStub.repoNames).toEqual(["tide"]);
+    expect(standaloneRepoNames).toEqual(["tide"]);
+  });
+
+  test("zero-result outro names the working repo and the `[<repo>] ` prefix form (ADR-0012)", async () => {
+    // When neither PRDs nor Standalone Issues match the prefix, the user
+    // needs to know which repo's prefix tide is filtering by, plus the two
+    // recovery moves (retitle, or create via skill). An empty picker is
+    // never silently confusing.
+    //
+    // clack's `outro` / `log.warn` write directly to `process.stdout`, not
+    // to the injected `stdout` callback — intercept the real stream.
+    const clackChunks: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk: string | Uint8Array): boolean => {
+      clackChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+
+    try {
+      const log: CallLog = { events: [] };
+      const buildStub: BuildStub = { exitCode: 0, calls: [] };
+      const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
+
+      await tideRun({
+        repoRoot,
+        stdout: captureStdout,
+        stderr: captureStderr,
+        build: makeBuild(buildStub, log),
+        getGhIdentity: makeGhIdentity(log),
+        getGhToken: makeGhToken(log),
+        listPRDs: makeListPRDs(listStub, log),
+        listStandaloneIssues: () => Promise.resolve([]),
+        assertInReviewStatePresent: () => Promise.resolve(),
+        baseBranchShellRunner: okBaseBranchRunner,
+      });
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    const out = clackChunks.join("");
+    expect(out).toContain("tide");
+    expect(out).toContain("[tide] ");
+    // The two recovery moves: retitle existing issues, or create a new one
+    // via the triage / to-prd / to-issues skill.
+    expect(out).toMatch(/retitle/i);
+    expect(out).toMatch(/triage|to-prd|to-issues/);
+  });
+
   test("non-empty PRD list invokes pickRoot and dispatches the picked PRD to runQueueAfterPick", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
@@ -326,6 +401,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         makePRD({ identifier: "ENG-8", title: "Auth migration" }),
       ],
       calls: [],
+      repoNames: [],
     };
     const pickStub: PickRootStub = { pickIndex: 1, calls: 0 };
     const queueCalls: RootRef[] = [];
@@ -365,7 +441,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("non-empty Standalone Issue list invokes pickRoot and dispatches the picked Issue", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
     const pickStub: PickRootStub = { standalonePickIndex: 0, calls: 0 };
     const queueCalls: RootRef[] = [];
 
@@ -402,7 +478,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("listPRDs receives the LINEAR_API_KEY and team key from config", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     await tideRun({
       repoRoot,
@@ -424,7 +500,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("LINEAR_API_KEY is not forwarded into the sandbox (it stays host-side)", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     // We can't observe the sandbox env directly here (the queue path is out
     // of scope for this slice). The narrower assertion: tideRun does not
@@ -448,7 +524,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("build runs after gh-identity is resolved", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     await tideRun({
       repoRoot,
@@ -472,7 +548,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("getGhToken runs after gh-identity and before docker build", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     await tideRun({
       repoRoot,
@@ -501,7 +577,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("getGhToken failure short-circuits before build", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
     const code = await tideRun({
       repoRoot,
@@ -551,7 +627,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("preflight refuses to start when `In Review` is missing — fails before build, gh, or Linear fetch", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
     let ghIdentityCalls = 0;
     let ghTokenCalls = 0;
 
@@ -594,7 +670,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
   test("preflight receives the LINEAR_API_KEY and team key from config", async () => {
     const log: CallLog = { events: [] };
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
-    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
     const calls: { apiKey: string; teamKey: string }[] = [];
 
     await tideRun({
@@ -1158,6 +1234,86 @@ describe("runQueueAfterPick — feature-branch guard", () => {
 
     // Guard didn't fire: fetchSubIssues is reached.
     expect(fetchSubIssuesCalls).toBe(1);
+  });
+
+  test("fetchSubIssues receives ghRepo.repo as the title-prefix scope (ADR-0012)", async () => {
+    // The PRD-root path threads the working repo's GitHub name through to
+    // every Sub-issue fetch — the rebuild call site at every iteration
+    // boundary delegates to the runner, which carries the same `repoName`
+    // it received here.
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7-search",
+    });
+
+    const fetchCalls: { issueId: string; repoName: string }[] = [];
+
+    await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: (_ctx, issueId, repoName) => {
+        fetchCalls.push({ issueId, repoName });
+        return Promise.resolve([]);
+      },
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 0, flipped: 0, processed: [] }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.repoName).toBe("widget");
+  });
+
+  test("Standalone Issue children-validation fetch also receives ghRepo.repo", async () => {
+    // The Standalone-Issue "no Linear children" check uses the same
+    // fetchSubIssues seam — apply the prefix filter uniformly.
+    const issue = makeStandaloneIssue({
+      identifier: "ENG-7",
+      branchName: "user/eng-7",
+    });
+
+    const fetchCalls: { issueId: string; repoName: string }[] = [];
+
+    await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: (_ctx, issueId, repoName) => {
+        fetchCalls.push({ issueId, repoName });
+        return Promise.resolve([]);
+      },
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.repoName).toBe("widget");
   });
 });
 

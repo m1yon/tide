@@ -181,6 +181,11 @@ export interface RunIssueQueueOptions {
   // Env map intended for the docker sandbox. Caller is responsible for
   // stripping LINEAR_API_KEY before passing this in.
   sandboxEnv: Record<string, string>;
+  // Working repo's GitHub name (from gh-identity). Threaded into every
+  // mid-run `fetchSubIssues` call as the `[<repoName>] ` title-prefix
+  // scope filter (ADR-0012) — wrong-repo and unprefixed Sub-issues are
+  // invisible to the queue rebuild and never absorbed.
+  repoName: string;
   /** Test seam — defaults to `linear.fetchIssueContent`. */
   fetchIssueContent?: (
     ctx: LinearContext,
@@ -221,8 +226,13 @@ export interface RunIssueQueueOptions {
   shellRunner?: ShellRunner;
   /** Test seam — defaults to `linear.fetchSubIssues`. Called at every
    * iteration boundary on PRD roots to absorb mid-run additions. See
-   * ADR-0010. Standalone roots never call this. */
-  fetchSubIssues?: (ctx: LinearContext, prdId: string) => Promise<SubIssue[]>;
+   * ADR-0010. Standalone roots never call this. The `repoName` argument
+   * applies the repo-prefix scope filter from ADR-0012. */
+  fetchSubIssues?: (
+    ctx: LinearContext,
+    prdId: string,
+    repoName: string
+  ) => Promise<SubIssue[]>;
 }
 
 export interface RunIssueQueueResult {
@@ -423,6 +433,22 @@ type RebuildOutcome =
   | { kind: "abort"; identifier: string; reason: string };
 
 /**
+ * User-facing warning when an iteration-boundary `fetchSubIssues` returns
+ * zero matching Sub-issues for the working repo. The runner keeps the
+ * previous boundary's queue and continues; this surfaces the most likely
+ * cause (a typo'd or unprefixed title under a `[<repoName>] ` PRD), so an
+ * empty rebuild is never silently confusing (ADR-0012).
+ */
+function emptySubIssueRebuildMessage(repoName: string): string {
+  return (
+    `Queue rebuild returned no sub-issues for repo "${repoName}". ` +
+    `Tide filters Linear titles by the \`[${repoName}] \` prefix. ` +
+    `Either retitle existing Linear issues to start with that prefix, ` +
+    `or create one with the triage / to-prd / to-issues skill.`
+  );
+}
+
+/**
  * Re-fetch the picked PRD's direct children and rebuild the topo-ordered
  * queue. The fetch result is fed to `buildOrderedQueue` unmodified — its
  * existing closed-blocker / external-blocker / cycle handling subsumes the
@@ -445,15 +471,27 @@ type RebuildOutcome =
 async function rebuildQueueAtBoundary(args: {
   linearCtx: LinearContext;
   prdId: string;
-  fetchSubIssues: (ctx: LinearContext, prdId: string) => Promise<SubIssue[]>;
+  repoName: string;
+  fetchSubIssues: (
+    ctx: LinearContext,
+    prdId: string,
+    repoName: string
+  ) => Promise<SubIssue[]>;
   knownIdentifiers: Set<string>;
 }): Promise<RebuildOutcome> {
   let subIssues: SubIssue[];
   try {
-    subIssues = await args.fetchSubIssues(args.linearCtx, args.prdId);
+    subIssues = await args.fetchSubIssues(
+      args.linearCtx,
+      args.prdId,
+      args.repoName
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { kind: "fetch-failed", reason: msg };
+  }
+  if (subIssues.length === 0) {
+    log.warn(emptySubIssueRebuildMessage(args.repoName));
   }
 
   // Don't pre-filter `handled` identifiers from the candidate set:
@@ -550,6 +588,7 @@ export async function runIssueQueue(
     repoRoot,
     config,
     sandboxEnv,
+    repoName,
   } = options;
   const fetchIssueContentFn =
     options.fetchIssueContent ?? defaultFetchIssueContent;
@@ -859,6 +898,7 @@ export async function runIssueQueue(
         const outcome = await rebuildQueueAtBoundary({
           linearCtx,
           prdId: root.id,
+          repoName,
           fetchSubIssues: fetchSubIssuesFn,
           knownIdentifiers,
         });
