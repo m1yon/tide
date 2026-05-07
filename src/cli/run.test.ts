@@ -1087,7 +1087,7 @@ describe("runQueueAfterPick — feature-branch guard", () => {
       },
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0, flipped: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
       },
       runPrTailStep: () => {
         runPrTailStepCalls += 1;
@@ -1144,7 +1144,8 @@ describe("runQueueAfterPick — feature-branch guard", () => {
         // here is fine — we only care that the guard didn't preempt.
         return Promise.reject(new Error("stop here"));
       },
-      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 0, flipped: 0, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opted-out" },
@@ -1205,7 +1206,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       },
       runIssueQueue: () => {
         events.push("runIssueQueue");
-        return Promise.resolve({ completed: 1, flipped: 0 });
+        return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
       },
       runPrTailStep: () => {
         events.push("runPrTailStep");
@@ -1259,7 +1260,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0, flipped: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1295,7 +1296,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0, flipped: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1336,7 +1337,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       runIssueQueue: (opts) => {
         capturedBaseBranch = opts.baseBranch;
-        return Promise.resolve({ completed: 1, flipped: 0 });
+        return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1419,7 +1420,8 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve(subIssues),
-      runIssueQueue: () => Promise.resolve({ completed: 2, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 2, flipped: 0, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opted-out" },
@@ -1461,7 +1463,8 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve(subIssues),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opted-out" },
@@ -1516,7 +1519,8 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: tail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
@@ -1649,7 +1653,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       sandboxEnv: {},
       // No children — the no-children validator must succeed.
       fetchSubIssues: () => Promise.resolve([]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opened", url: "https://example/pr/1" },
@@ -1690,7 +1695,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       runIssueQueue: (opts) => {
         capturedOrdered = opts.orderedIssues;
         capturedRoot = opts.root;
-        return Promise.resolve({ completed: 1, flipped: 0 });
+        return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1736,7 +1741,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
         ] as SubIssue[]),
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0, flipped: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1795,7 +1800,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       },
       runIssueQueue: () => {
         runIssueQueueCalls += 1;
-        return Promise.resolve({ completed: 0, flipped: 0 });
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
       },
       runPrTailStep: () =>
         Promise.resolve({
@@ -1831,7 +1836,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
-      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opted-out" },
@@ -1868,7 +1874,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opened", url: "https://example/pr/1" },
@@ -1908,7 +1915,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       // `ready-for-human`. The Standalone-specific warning must not fire —
       // the per-sub-issue warning (logged inside the runner, not here) is
       // the only BLOCKED hand-off the user should see.
-      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opted-out" },
@@ -1939,7 +1947,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: () =>
         Promise.resolve({
           outcome: { kind: "opened", url: "https://example/pr/1" },
@@ -1970,7 +1979,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: (opts) => {
         capturedSubIssues = opts.subIssues;
         return Promise.resolve({
@@ -1985,6 +1995,70 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     });
 
     expect(capturedSubIssues).toEqual([]);
+  });
+});
+
+describe("runQueueAfterPick — PR-tail subIssueRefs come from runner.processed (ADR-0010)", () => {
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  test("PRD root: PR body's Sub-issues addressed block is built from result.processed, not the pre-flight orderedIssues", async () => {
+    const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
+    let capturedSubIssues: { number: number; title: string }[] | undefined;
+
+    await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      // Pre-flight returns one ready-for-agent sub-issue.
+      fetchSubIssues: () =>
+        Promise.resolve([
+          {
+            id: "uuid-2",
+            identifier: "ENG-2",
+            title: "Initial",
+            state: "Backlog",
+            stateType: "backlog",
+            labels: ["ready-for-agent"],
+            blockedBy: [],
+          },
+        ] as SubIssue[]),
+      // Runner reports it processed two — initial + one absorbed via the
+      // mid-run queue rebuild (ENG-3). The PR-tail step must reflect both.
+      runIssueQueue: () =>
+        Promise.resolve({
+          completed: 2,
+          flipped: 0,
+          processed: [
+            { id: "uuid-2", identifier: "ENG-2", title: "Initial" },
+            { id: "uuid-3", identifier: "ENG-3", title: "Absorbed" },
+          ],
+        }),
+      runPrTailStep: (opts) => {
+        capturedSubIssues = opts.subIssues;
+        return Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "ok",
+          exitCode: 0,
+        } satisfies PrTailStepResult);
+      },
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => Promise.resolve(),
+    });
+
+    expect(capturedSubIssues).toEqual([
+      { number: 1, title: "ENG-2 Initial" },
+      { number: 2, title: "ENG-3 Absorbed" },
+    ]);
   });
 });
 
@@ -2042,7 +2116,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
@@ -2072,7 +2147,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: optedOutTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(false),
@@ -2102,7 +2178,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 1 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 1, processed: [] }),
       runPrTailStep: openedTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
@@ -2133,7 +2210,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: optedOutTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(false),
@@ -2162,7 +2240,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
@@ -2240,7 +2319,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
@@ -2270,7 +2350,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: optedOutTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(false),
@@ -2300,7 +2381,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: openedTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),
@@ -2332,7 +2414,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 0, flipped: 1, processed: [] }),
       runPrTailStep: optedOutTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(false),
@@ -2362,7 +2445,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
       config: baseConfig,
       sandboxEnv: {},
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
-      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
       confirmRun: () => Promise.resolve(true),
       confirmPr: () => Promise.resolve(true),

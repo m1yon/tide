@@ -21,7 +21,30 @@ import {
   type ShellRunner,
 } from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
-import type { LinearContext, LinearIssueContent } from "../linear/index.ts";
+import type {
+  LinearContext,
+  LinearIssueContent,
+  SubIssue,
+} from "../linear/index.ts";
+
+/**
+ * Map a runner's `OrderedIssue[]` into the `SubIssue[]` shape that
+ * `fetchSubIssues` returns, with `ready-for-agent` labels and no blockers.
+ * Used by tests to seed the per-boundary queue rebuild (ADR-0010) so
+ * iteration ≥2 has the same candidate set as the pre-flight queue. Tests
+ * that only need a single iteration can simply pass `() => []`.
+ */
+function asSubIssues(orderedIssues: OrderedIssue[]): SubIssue[] {
+  return orderedIssues.map((o) => ({
+    id: o.id,
+    identifier: o.identifier,
+    title: o.title,
+    state: "Backlog",
+    stateType: "backlog",
+    labels: ["ready-for-agent"],
+    blockedBy: [],
+  }));
+}
 
 interface ShellCall {
   cmd: string;
@@ -95,6 +118,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => {
         events.push("fetchContent");
         return Promise.resolve(makeIssueContent());
@@ -144,6 +168,13 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve(
+          asSubIssues([
+            makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+            makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+          ])
+        ),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: (_ctx, issueId) => {
         events.push(`inProgress:${issueId}`);
@@ -250,6 +281,13 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve(
+          asSubIssues([
+            makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+            makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+          ])
+        ),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: (_ctx, issueId) => {
         events.push(`inProgress:${issueId}`);
@@ -344,6 +382,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -378,6 +417,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => {
         events.push("inProgress");
@@ -441,6 +481,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => {
         events.push("inProgress");
@@ -503,6 +544,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -552,6 +594,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -605,6 +648,13 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve(
+          asSubIssues([
+            makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+            makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+          ])
+        ),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -661,6 +711,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => {
         events.push("inProgress");
@@ -694,6 +745,13 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve(
+          asSubIssues([
+            makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+            makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+          ])
+        ),
       fetchIssueContent: (_ctx, issueId) =>
         Promise.resolve(makeIssueContent({ identifier: issueId })),
       transitionToInProgress: (_ctx, issueId) => {
@@ -738,6 +796,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: (_ctx, issueId) => {
         inProgressCalls.push(issueId);
@@ -768,6 +827,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () =>
         Promise.resolve(makeIssueContent({ identifier: "ENG-7" })),
       transitionToInProgress: () => Promise.resolve(),
@@ -807,6 +867,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -838,6 +899,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => {
@@ -895,6 +957,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -921,6 +984,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -968,6 +1032,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: () => Promise.resolve(),
@@ -1006,6 +1071,13 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve(
+          asSubIssues([
+            makeOrdered({ id: "uuid-1", identifier: "ENG-1" }),
+            makeOrdered({ id: "uuid-2", identifier: "ENG-2" }),
+          ])
+        ),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: (_ctx, issueId) => {
         events.push(`inProgress:${issueId}`);
@@ -1161,6 +1233,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([]),
       fetchIssueContent: () => Promise.resolve(makeIssueContent()),
       transitionToInProgress: () => Promise.resolve(),
       transitionToDone: (_ctx, issueId) => {
@@ -1173,5 +1246,554 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
     // Sub-issues continue to transition to Done host-side (real-time
     // per-iteration progress, ADR-0005).
     expect(doneCalls).toEqual(["uuid-sub-1"]);
+  });
+});
+
+describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
+  test("PRD root: result.processed lists every sub-issue the runner ran an iteration on, in run order", async () => {
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2", title: "Second" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () =>
+        Promise.resolve(
+          asSubIssues([
+            makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+            makeOrdered({
+              id: "uuid-2",
+              identifier: "ENG-2",
+              title: "Second",
+            }),
+          ])
+        ),
+      fetchIssueContent: (_ctx, issueId) =>
+        Promise.resolve(makeIssueContent({ identifier: issueId })),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    expect(result.processed.map((o) => o.identifier)).toEqual([
+      "ENG-1",
+      "ENG-2",
+    ]);
+  });
+
+  test("PRD root: human adds a fresh ready-for-agent sub-issue mid-run; it is absorbed and runs after the snapshot drains", async () => {
+    const events: string[] = [];
+    let fetchCount = 0;
+
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCount += 1;
+        // After iteration 1, the human added ENG-2 in Linear's UI.
+        if (fetchCount === 1) {
+          return Promise.resolve(
+            asSubIssues([
+              makeOrdered({
+                id: "uuid-1",
+                identifier: "ENG-1",
+                title: "First",
+              }),
+              makeOrdered({
+                id: "uuid-2",
+                identifier: "ENG-2",
+                title: "Late arrival",
+              }),
+            ])
+          );
+        }
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: (_ctx, issueId) => {
+        events.push(`fetch:${issueId}`);
+        return Promise.resolve(makeIssueContent({ identifier: issueId }));
+      },
+      transitionToInProgress: (_ctx, issueId) => {
+        events.push(`inProgress:${issueId}`);
+        return Promise.resolve();
+      },
+      transitionToDone: (_ctx, issueId) => {
+        events.push(`done:${issueId}`);
+        return Promise.resolve();
+      },
+      sandboxRun: () => {
+        events.push("run");
+        return Promise.resolve(makeSandboxRunResult());
+      },
+    });
+
+    expect(result.completed).toBe(2);
+    expect(result.flipped).toBe(0);
+    expect(result.abortedAt).toBeUndefined();
+    expect(result.processed.map((o) => o.identifier)).toEqual([
+      "ENG-1",
+      "ENG-2",
+    ]);
+    // Iteration 1 ran ENG-1 → boundary fetch absorbed ENG-2 → iteration 2 ran ENG-2.
+    expect(events).toContain("inProgress:uuid-1");
+    expect(events).toContain("done:uuid-1");
+    expect(events).toContain("inProgress:uuid-2");
+    expect(events).toContain("done:uuid-2");
+  });
+
+  test("PRD root: late arrival X with blockedBy → still-queued Y runs Y first regardless of arrival order", async () => {
+    const events: string[] = [];
+    let fetchCount = 0;
+
+    // Initial queue has only ENG-1 (Y) — the human will add ENG-2 (X)
+    // mid-run with blockedBy: ["ENG-1"]. The rebuild should re-topo-sort,
+    // but ENG-1 is in `handled` after iteration 1, so only ENG-2 remains
+    // and runs next.
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "Y first" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCount += 1;
+        if (fetchCount === 1) {
+          // Boundary 1: ENG-2 (X) shows up with blockedBy ENG-1 (Y).
+          return Promise.resolve([
+            ...asSubIssues([
+              makeOrdered({
+                id: "uuid-1",
+                identifier: "ENG-1",
+                title: "Y first",
+              }),
+            ]),
+            {
+              id: "uuid-2",
+              identifier: "ENG-2",
+              title: "X depends on Y",
+              state: "Backlog",
+              stateType: "backlog",
+              labels: ["ready-for-agent"],
+              blockedBy: ["ENG-1"],
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: (_ctx, issueId) => {
+        events.push(`fetch:${issueId}`);
+        return Promise.resolve(makeIssueContent({ identifier: issueId }));
+      },
+      transitionToInProgress: (_ctx, issueId) => {
+        events.push(`inProgress:${issueId}`);
+        return Promise.resolve();
+      },
+      transitionToDone: (_ctx, issueId) => {
+        events.push(`done:${issueId}`);
+        return Promise.resolve();
+      },
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    // Y ran first (it was the snapshot's only entry), then X was absorbed
+    // and ran after — topo-correct because ENG-1 was already handled when
+    // the rebuild fired, so the buildOrderedQueue's external-blocker check
+    // never triggers (a handled identifier is filtered out before the
+    // dep-graph sees it).
+    expect(result.processed.map((o) => o.identifier)).toEqual([
+      "ENG-1",
+      "ENG-2",
+    ]);
+    expect(events).toEqual([
+      "fetch:uuid-prd", // parent PRD body fetch
+      "fetch:uuid-1",
+      "inProgress:uuid-1",
+      "done:uuid-1",
+      "fetch:uuid-2",
+      "inProgress:uuid-2",
+      "done:uuid-2",
+    ]);
+  });
+
+  test("PRD root: late arrival X with blockedBy → already-flipped sibling errors as external-blocker; X is skipped, the rest of the queue continues", async () => {
+    let fetchCount = 0;
+    let runCount = 0;
+
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2", title: "Second" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCount += 1;
+        if (fetchCount === 1) {
+          // After iteration 1: ENG-1 was just flipped (BLOCKED). The
+          // human added ENG-3 with blockedBy ENG-1 — but tide flipped
+          // ENG-1 to ready-for-human, so the rebuild must reject ENG-3.
+          // ENG-2 is still ready-for-agent and should still run.
+          return Promise.resolve([
+            // ENG-1 lost its `ready-for-agent` (now `ready-for-human`).
+            {
+              id: "uuid-1",
+              identifier: "ENG-1",
+              title: "First",
+              state: "In Progress",
+              stateType: "started",
+              labels: ["ready-for-human"],
+              blockedBy: [],
+            },
+            ...asSubIssues([
+              makeOrdered({
+                id: "uuid-2",
+                identifier: "ENG-2",
+                title: "Second",
+              }),
+            ]),
+            {
+              id: "uuid-3",
+              identifier: "ENG-3",
+              title: "Late arrival blocked by flipped",
+              state: "Backlog",
+              stateType: "backlog",
+              labels: ["ready-for-agent"],
+              blockedBy: ["ENG-1"],
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      flipLabelToReadyForHuman: () => Promise.resolve(),
+      postComment: () => Promise.resolve(),
+      sandboxRun: (opts: SandboxRunOptions) => {
+        if (opts.name === "tide-summarizer") {
+          return Promise.resolve(
+            makeSandboxRunResult({
+              commits: [],
+              completionSignal: undefined,
+              logFilePath: "/tmp/summary.log",
+            })
+          );
+        }
+        runCount += 1;
+        // Iteration 1 (working ENG-1): BLOCKED to set up the flipped
+        // sibling for the rebuild's external-blocker error. Iteration 2
+        // (working ENG-2): clean success.
+        if (runCount === 1) {
+          return Promise.resolve(
+            makeSandboxRunResult({
+              commits: [],
+              completionSignal: BLOCKED_SIGNAL,
+              logFilePath: "/tmp/eng-1.log",
+            })
+          );
+        }
+        return Promise.resolve(makeSandboxRunResult());
+      },
+      readFinalAssistantMessage: () =>
+        Promise.resolve("summarized comment body"),
+    });
+
+    expect(result.abortedAt).toBeUndefined();
+    expect(result.flipped).toBe(1);
+    expect(result.completed).toBe(1);
+    // ENG-3 was skipped (warn-and-skip). ENG-2 ran cleanly after the rebuild.
+    expect(result.processed.map((o) => o.identifier)).toEqual([
+      "ENG-1",
+      "ENG-2",
+    ]);
+  });
+
+  test("PRD root: rebuild error survives the retry → tide aborts via the existing infra-failure path", async () => {
+    let fetchCount = 0;
+
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2", title: "Second" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCount += 1;
+        // After iteration 1: ENG-2 has acquired a blockedBy that points to
+        // an external (out-of-PRD) identifier. Dropping ENG-2 from
+        // candidates leaves the queue empty, but the parser surfaces the
+        // identifier and the second pass succeeds — so we engineer a
+        // case that fails BOTH passes: ENG-2 is blocked by ENG-99
+        // (external), AND we add a second still-bad node ENG-3 also
+        // blocked by ENG-99. Dropping just one isn't enough.
+        if (fetchCount === 1) {
+          return Promise.resolve([
+            {
+              id: "uuid-2",
+              identifier: "ENG-2",
+              title: "Second",
+              state: "Backlog",
+              stateType: "backlog",
+              labels: ["ready-for-agent"],
+              blockedBy: ["ENG-99"],
+            },
+            {
+              id: "uuid-3",
+              identifier: "ENG-3",
+              title: "Third",
+              state: "Backlog",
+              stateType: "backlog",
+              labels: ["ready-for-agent"],
+              blockedBy: ["ENG-99"],
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: (_ctx, issueId) =>
+        Promise.resolve(makeIssueContent({ identifier: issueId })),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    expect(result.abortedAt).toBeDefined();
+    expect(result.abortedAt?.identifier).toMatch(/^ENG-/);
+    expect(result.abortedAt?.reason).toContain("queue rebuild failed");
+    // ENG-1 ran cleanly before the abort.
+    expect(result.completed).toBe(1);
+    expect(result.processed.map((o) => o.identifier)).toEqual(["ENG-1"]);
+  });
+
+  test("PRD root: fetchSubIssues throws mid-run → warn-and-continue with the previous boundary's queue", async () => {
+    let fetchCount = 0;
+    const events: string[] = [];
+
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2", title: "Second" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCount += 1;
+        if (fetchCount === 1) {
+          return Promise.reject(new Error("Linear API hiccup"));
+        }
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: (_ctx, issueId) => {
+        events.push(`fetch:${issueId}`);
+        return Promise.resolve(makeIssueContent({ identifier: issueId }));
+      },
+      transitionToInProgress: (_ctx, issueId) => {
+        events.push(`inProgress:${issueId}`);
+        return Promise.resolve();
+      },
+      transitionToDone: (_ctx, issueId) => {
+        events.push(`done:${issueId}`);
+        return Promise.resolve();
+      },
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    // ENG-2 still ran because the rebuild fell back to the previous queue.
+    expect(result.abortedAt).toBeUndefined();
+    expect(result.completed).toBe(2);
+    expect(result.processed.map((o) => o.identifier)).toEqual([
+      "ENG-1",
+      "ENG-2",
+    ]);
+  });
+
+  test("PRD root: queued-but-not-yet-run sub-issue loses ready-for-agent mid-run → silently dropped on next rebuild", async () => {
+    let fetchCount = 0;
+
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+        makeOrdered({ id: "uuid-2", identifier: "ENG-2", title: "Second" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCount += 1;
+        if (fetchCount === 1) {
+          // Human removed `ready-for-agent` from ENG-2 mid-run.
+          return Promise.resolve([
+            ...asSubIssues([
+              makeOrdered({
+                id: "uuid-1",
+                identifier: "ENG-1",
+                title: "First",
+              }),
+            ]),
+            {
+              id: "uuid-2",
+              identifier: "ENG-2",
+              title: "Second",
+              state: "Backlog",
+              stateType: "backlog",
+              labels: [],
+              blockedBy: [],
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: (_ctx, issueId) =>
+        Promise.resolve(makeIssueContent({ identifier: issueId })),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    expect(result.abortedAt).toBeUndefined();
+    expect(result.completed).toBe(1);
+    expect(result.processed.map((o) => o.identifier)).toEqual(["ENG-1"]);
+  });
+
+  test("Standalone Issue root: never calls fetchSubIssues — the rebuild path is skipped entirely", async () => {
+    let fetchCalls = 0;
+
+    const result = await runIssueQueue({
+      root: { kind: "standalone" },
+      orderedIssues: [makeOrdered({ id: "uuid-iss-7", identifier: "ENG-7" })],
+      branch: "feature/eng-7",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCalls += 1;
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: () => Promise.resolve(makeIssueContent()),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      sandboxRun: () => Promise.resolve(makeSandboxRunResult()),
+    });
+
+    expect(fetchCalls).toBe(0);
+    expect(result.processed).toHaveLength(1);
+    expect(result.processed[0]?.identifier).toBe("ENG-7");
+  });
+
+  test("PRD root: an absorbed sub-issue that BLOCKEDs appears in `processed` and counts toward `flipped`", async () => {
+    let runCount = 0;
+    let fetchCount = 0;
+
+    const result = await runIssueQueue({
+      root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
+      orderedIssues: [
+        makeOrdered({ id: "uuid-1", identifier: "ENG-1", title: "First" }),
+      ],
+      branch: "feature/eng",
+      baseBranch: "master",
+      linearCtx,
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => {
+        fetchCount += 1;
+        if (fetchCount === 1) {
+          return Promise.resolve(
+            asSubIssues([
+              makeOrdered({
+                id: "uuid-1",
+                identifier: "ENG-1",
+                title: "First",
+              }),
+              makeOrdered({
+                id: "uuid-2",
+                identifier: "ENG-2",
+                title: "Late",
+              }),
+            ])
+          );
+        }
+        return Promise.resolve([]);
+      },
+      fetchIssueContent: (_ctx, issueId) =>
+        Promise.resolve(makeIssueContent({ identifier: issueId })),
+      transitionToInProgress: () => Promise.resolve(),
+      transitionToDone: () => Promise.resolve(),
+      flipLabelToReadyForHuman: () => Promise.resolve(),
+      postComment: () => Promise.resolve(),
+      sandboxRun: (opts: SandboxRunOptions) => {
+        runCount += 1;
+        // Iteration 1 (working): ENG-1 succeeds. Iteration 2 (working):
+        // ENG-2 BLOCKEDs. Iteration 3 (summarizer for ENG-2).
+        if (opts.name === "tide-summarizer") {
+          return Promise.resolve(
+            makeSandboxRunResult({
+              commits: [],
+              completionSignal: undefined,
+              logFilePath: "/tmp/eng-2-summary.log",
+            })
+          );
+        }
+        if (runCount === 1) {
+          return Promise.resolve(makeSandboxRunResult());
+        }
+        return Promise.resolve(
+          makeSandboxRunResult({
+            commits: [],
+            completionSignal: BLOCKED_SIGNAL,
+            logFilePath: "/tmp/eng-2-working.log",
+          })
+        );
+      },
+      readFinalAssistantMessage: () => Promise.resolve("summary"),
+    });
+
+    expect(result.completed).toBe(1);
+    expect(result.flipped).toBe(1);
+    expect(result.processed.map((o) => o.identifier)).toEqual([
+      "ENG-1",
+      "ENG-2",
+    ]);
   });
 });
