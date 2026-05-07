@@ -3,6 +3,10 @@ import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
 import { getGhIdentity } from "../gh-identity/index.ts";
+import {
+  assertInReviewStatePresent as defaultAssertInReviewStatePresent,
+  type LinearContext,
+} from "../linear/index.ts";
 
 declare const VERSION: string | undefined;
 const version: string = typeof VERSION === "string" ? VERSION : "dev";
@@ -57,6 +61,13 @@ const defaultLinearViewerCheck: LinearViewerCheck = async (apiKey) => {
   }
 };
 
+/**
+ * Verifies the configured Linear team has the `"In Review"` workflow state
+ * tide expects. Throws on failure with a `tide setup` hint. Pulled out so
+ * doctor can stub it in tests without hitting the live API.
+ */
+export type LinearInReviewStateCheck = (ctx: LinearContext) => Promise<void>;
+
 export interface DoctorOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
   repoRoot?: string;
@@ -66,6 +77,8 @@ export interface DoctorOptions {
   runner?: Runner;
   /** Linear API key check (used by tests to stub the Linear SDK). */
   linearViewerCheck?: LinearViewerCheck;
+  /** Linear `In Review` state check (used by tests to stub the SDK). */
+  linearInReviewStateCheck?: LinearInReviewStateCheck;
 }
 
 interface CheckResult {
@@ -92,6 +105,8 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
   const runner = options.runner ?? defaultRunner;
   const linearViewerCheck =
     options.linearViewerCheck ?? defaultLinearViewerCheck;
+  const linearInReviewStateCheck =
+    options.linearInReviewStateCheck ?? defaultAssertInReviewStatePresent;
 
   let repoRoot: string;
   try {
@@ -105,6 +120,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
   // We resolve env and config lazily so each step's failure is reported in
   // isolation. The cached results are reused by later steps when available.
   let envCache: Record<string, string> | null = null;
+  let teamKeyCache: string | null = null;
 
   const steps: Step[] = [
     {
@@ -139,7 +155,8 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
       name: ".tide/config.ts",
       run: async () => {
         try {
-          await loadConfig({ repoRoot });
+          const config = await loadConfig({ repoRoot });
+          teamKeyCache = config.linear.team;
           return { ok: true };
         } catch (err) {
           return {
@@ -188,6 +205,33 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
           return {
             ok: false,
             hint: `Linear viewer query failed: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      },
+    },
+    {
+      name: 'Linear "In Review" state',
+      run: async () => {
+        if (envCache === null || teamKeyCache === null) {
+          return {
+            ok: false,
+            hint: "Skipped — .tide/.env or .tide/config.ts did not load.",
+          };
+        }
+        const apiKey = envCache.LINEAR_API_KEY;
+        if (typeof apiKey !== "string" || apiKey === "") {
+          return {
+            ok: false,
+            hint: "LINEAR_API_KEY in .tide/.env is empty.",
+          };
+        }
+        try {
+          await linearInReviewStateCheck({ apiKey, teamKey: teamKeyCache });
+          return { ok: true };
+        } catch (err) {
+          return {
+            ok: false,
+            hint: err instanceof Error ? err.message : String(err),
           };
         }
       },

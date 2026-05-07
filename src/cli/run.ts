@@ -46,10 +46,12 @@ import {
 } from "../gh-token/index.ts";
 import type { GhRepo } from "../github/index.ts";
 import {
+  assertInReviewStatePresent as defaultAssertInReviewStatePresent,
   fetchSubIssues as defaultFetchSubIssues,
   listPRDs as defaultListPRDs,
   listStandaloneIssues as defaultListStandaloneIssues,
   transitionToInProgress as defaultTransitionToInProgress,
+  transitionToInReview as defaultTransitionToInReview,
   type LinearContext,
   type PRD,
   type StandaloneIssue,
@@ -95,6 +97,11 @@ export interface RunOptions {
   listPRDs?: (ctx: LinearContext) => Promise<PRD[]>;
   /** Linear Standalone Issue list fetcher. Tests stub this. */
   listStandaloneIssues?: (ctx: LinearContext) => Promise<StandaloneIssue[]>;
+  /**
+   * Linear `"In Review"` state preflight assertion. Tests stub this to
+   * avoid hitting Linear. Defaults to `linear.assertInReviewStatePresent`.
+   */
+  assertInReviewStatePresent?: (ctx: LinearContext) => Promise<void>;
   /** Root selector prompt. Tests stub this to bypass the clack UI. */
   pickRoot?: (input: {
     prds: readonly PRD[];
@@ -139,6 +146,17 @@ export interface RunQueueAfterPickOptions {
    * confirms have been answered. For PRD roots this is the PRD itself; for
    * Standalone Issue roots this is the issue itself. */
   transitionRootToInProgress?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+  /**
+   * Test seam — defaults to `linear.transitionToInReview`. Fired by the
+   * post-submission hook after a clean queue + successful PR open against a
+   * PRD root, transitioning the PRD to *In Review*. Failure of this
+   * transition is non-fatal: the PR and earlier Linear writes are preserved
+   * and the failure surfaces as a warning in the run output.
+   */
+  transitionRootToInReview?: (
     ctx: LinearContext,
     issueId: string
   ) => Promise<void>;
@@ -432,6 +450,8 @@ export async function runQueueAfterPick(
   const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
   const transitionRootToInProgressFn =
     opts.transitionRootToInProgress ?? defaultTransitionToInProgress;
+  const transitionRootToInReviewFn =
+    opts.transitionRootToInReview ?? defaultTransitionToInReview;
 
   const root = rootMetaFromPicked(opts.picked);
 
@@ -621,6 +641,32 @@ export async function runQueueAfterPick(
     log.success(tail.outcome.url);
   }
 
+  // Post-submission *In Review* hand-off. Fires when the queue ran cleanly
+  // (every queued unit completed, none flipped) AND the PR was opened. Any
+  // other combination skips: PRD roots get an explicit "not transitioned"
+  // warning; Standalone Issue roots fall through to the existing BLOCKED
+  // warning below. Transition failure preserves the PR and the queue's
+  // existing Linear writes — the failure surfaces as a warning, not a
+  // non-zero exit.
+  if (tail.outcome.kind === "opened") {
+    const queueClean = queueResult.completed > 0 && queueResult.flipped === 0;
+    const rootLabel = opts.picked.kind === "prd" ? "PRD" : "Issue";
+    if (queueClean) {
+      try {
+        await transitionRootToInReviewFn(opts.linearCtx, root.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn(
+          `Failed to transition ${rootLabel} ${root.identifier} to In Review: ${msg}. PR was opened; transition manually in Linear.`
+        );
+      }
+    } else if (opts.picked.kind === "prd") {
+      log.warn(
+        `PRD ${root.identifier} not transitioned to In Review — queue had flipped or incomplete sub-issues. Transition manually in Linear if appropriate.`
+      );
+    }
+  }
+
   // Standalone-Issue end-of-run BLOCKED warning: when no commits landed on
   // the iteration the issue is now flipped to `ready-for-human` and stays
   // *In Progress* until the user resolves it. Fire alongside the no-merge
@@ -690,6 +736,8 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     options.listStandaloneIssues ?? defaultListStandaloneIssues;
   const pickRootFn = options.pickRoot ?? defaultPickRoot;
   const runQueueAfterPickFn = options.runQueueAfterPick ?? runQueueAfterPick;
+  const assertInReviewStatePresentFn =
+    options.assertInReviewStatePresent ?? defaultAssertInReviewStatePresent;
 
   let repoRoot: string;
   try {
@@ -747,6 +795,24 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     sandboxEnv[k] = v;
   }
 
+  const linearCtx: LinearContext = {
+    apiKey: linearApiKey,
+    teamKey: config.linear.team,
+  };
+
+  // Preflight: refuse to start when the team has no "In Review" workflow
+  // state. Without this gate a clean run would only discover the missing
+  // state at the post-submission hand-off, after the queue has already done
+  // its work — a silent fallback to Done would re-introduce the original
+  // PER-51 problem.
+  try {
+    await assertInReviewStatePresentFn(linearCtx);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr(`${msg}\n`);
+    return 1;
+  }
+
   // Resolve GitHub identity from `gh repo view`. The Linear-native flow no
   // longer fetches a triage tree from GitHub, but identity (and `gh auth
   // token` below) are still required for the eventual PR-tail step.
@@ -787,10 +853,6 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   // Fetch PRDs and Standalone Issues in parallel.
   const fetchSpin = spinner();
   fetchSpin.start("Fetching PRDs and Standalone Issues from Linear");
-  const linearCtx: LinearContext = {
-    apiKey: linearApiKey,
-    teamKey: config.linear.team,
-  };
   let prds: PRD[];
   let standaloneIssues: StandaloneIssue[];
   try {

@@ -1,23 +1,30 @@
 import { describe, expect, test } from "bun:test";
 import { PaginationOrderBy } from "@linear/sdk";
 import {
+  IN_REVIEW_STATE_NAME,
   SETUP_LABEL_NAMES,
+  assertInReviewStatePresent,
   fetchIssueContent,
   fetchSubIssues,
   flipLabelToReadyForHuman,
   listPRDs,
   listStandaloneIssues,
+  pickWorkflowStateByName,
   pickWorkflowStateByType,
   postComment,
+  provisionInReviewState,
   setupLabels,
   transitionToDone,
   transitionToInProgress,
+  transitionToInReview,
+  type AssertInReviewStatePresentClient,
   type LinearContext,
   type LinearGqlRequest,
   type ListPRDsClient,
   type ListPRDsIssueFilter,
   type ListStandaloneIssuesClient,
   type ListStandaloneIssuesFilter,
+  type ProvisionInReviewStateClient,
   type SetupLabelsClient,
 } from "./index.ts";
 
@@ -216,6 +223,71 @@ describe("linear.pickWorkflowStateByType", () => {
 
   test("returns undefined for an empty input", () => {
     expect(pickWorkflowStateByType([], "started")).toBeUndefined();
+  });
+});
+
+describe("linear.pickWorkflowStateByName", () => {
+  test("returns the matching state's id when present", () => {
+    const id = pickWorkflowStateByName(
+      [
+        { id: "s-doing", name: "In Progress", type: "started", position: 1 },
+        { id: "s-review", name: "In Review", type: "started", position: 2 },
+        { id: "s-done", name: "Done", type: "completed", position: 3 },
+      ],
+      "In Review"
+    );
+    expect(id).toBe("s-review");
+  });
+
+  test("returns undefined when no state matches the name", () => {
+    const id = pickWorkflowStateByName(
+      [
+        { id: "s-doing", name: "In Progress", type: "started", position: 1 },
+        { id: "s-done", name: "Done", type: "completed", position: 2 },
+      ],
+      "In Review"
+    );
+    expect(id).toBeUndefined();
+  });
+
+  test("returns undefined for an empty input", () => {
+    expect(pickWorkflowStateByName([], "In Review")).toBeUndefined();
+  });
+
+  test("type filter excludes a same-name state of the wrong type", () => {
+    // A team that has accidentally created an "In Review" state of the
+    // wrong `type` (e.g. `unstarted` instead of `started`) must not be
+    // resolved when the caller constrains by type.
+    const id = pickWorkflowStateByName(
+      [
+        { id: "s-bogus", name: "In Review", type: "unstarted", position: 0 },
+        { id: "s-real", name: "In Review", type: "started", position: 5 },
+      ],
+      "In Review",
+      "started"
+    );
+    expect(id).toBe("s-real");
+  });
+
+  test("breaks duplicate-name ties deterministically by lowest position", () => {
+    const id = pickWorkflowStateByName(
+      [
+        { id: "s-late", name: "In Review", type: "started", position: 9 },
+        { id: "s-early", name: "In Review", type: "started", position: 2 },
+        { id: "s-mid", name: "In Review", type: "started", position: 5 },
+      ],
+      "In Review",
+      "started"
+    );
+    expect(id).toBe("s-early");
+  });
+
+  test("name match is case-sensitive", () => {
+    const id = pickWorkflowStateByName(
+      [{ id: "s", name: "in review", type: "started", position: 1 }],
+      "In Review"
+    );
+    expect(id).toBeUndefined();
   });
 });
 
@@ -851,7 +923,7 @@ describe("linear.fetchIssueContent", () => {
 
 interface TransitionStubOptions {
   /** The team's workflow states. */
-  states?: { id: string; type: string; position: number }[];
+  states?: { id: string; name?: string; type: string; position: number }[];
   /** If true, the issue lookup returns null. */
   missingIssue?: boolean;
   /** If true, issueUpdate returns success=false. */
@@ -863,9 +935,9 @@ function makeTransitionStub(opts: TransitionStubOptions = {}): {
   calls: GqlCall[];
 } {
   const states = opts.states ?? [
-    { id: "state-todo", type: "unstarted", position: 0 },
-    { id: "state-doing", type: "started", position: 1 },
-    { id: "state-done", type: "completed", position: 2 },
+    { id: "state-todo", name: "Todo", type: "unstarted", position: 0 },
+    { id: "state-doing", name: "In Progress", type: "started", position: 1 },
+    { id: "state-done", name: "Done", type: "completed", position: 2 },
   ];
   return makeGqlStub((call) => {
     if (call.query.includes("TideIssueTeamStates")) {
@@ -1015,6 +1087,114 @@ describe("linear.transitionToDone", () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/completed/);
+  });
+});
+
+describe("linear.transitionToInReview", () => {
+  test("resolves the `In Review` started-type state and updates the issue", async () => {
+    const stub = makeTransitionStub({
+      states: [
+        {
+          id: "state-doing",
+          name: "In Progress",
+          type: "started",
+          position: 1,
+        },
+        { id: "state-review", name: "In Review", type: "started", position: 2 },
+        { id: "state-done", name: "Done", type: "completed", position: 3 },
+      ],
+    });
+
+    await transitionToInReview(ctx, "issue-uuid", stub.request);
+
+    expect(stub.calls).toHaveLength(2);
+    const fetchCall = stub.calls[0];
+    const mutateCall = stub.calls[1];
+    if (!fetchCall || !mutateCall) throw new Error("unreachable");
+    expect(fetchCall.query).toContain("TideIssueTeamStates");
+    expect(fetchCall.variables).toEqual({ id: "issue-uuid" });
+    expect(mutateCall.query).toContain("TideIssueTransition");
+    expect(mutateCall.variables).toEqual({
+      id: "issue-uuid",
+      stateId: "state-review",
+    });
+  });
+
+  test("ignores a same-name state of the wrong type", async () => {
+    // A team that accidentally has an "In Review" `unstarted` state must
+    // not be resolved — we constrain by `state.type === "started"`.
+    const stub = makeTransitionStub({
+      states: [
+        { id: "bogus", name: "In Review", type: "unstarted", position: 0 },
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "review", name: "In Review", type: "started", position: 2 },
+        { id: "done", name: "Done", type: "completed", position: 3 },
+      ],
+    });
+
+    await transitionToInReview(ctx, "issue-uuid", stub.request);
+
+    const mutateCall = stub.calls[1];
+    if (!mutateCall) throw new Error("unreachable");
+    expect(mutateCall.variables).toEqual({
+      id: "issue-uuid",
+      stateId: "review",
+    });
+  });
+
+  test("throws when the issue id does not resolve", async () => {
+    const stub = makeTransitionStub({ missingIssue: true });
+    let caught: unknown = null;
+    try {
+      await transitionToInReview(ctx, "missing-uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(
+      /issue with id "missing-uuid" not found/
+    );
+    // No mutation issued.
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  test("throws with a `tide setup` hint when the team has no `In Review` state", async () => {
+    const stub = makeTransitionStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "done", name: "Done", type: "completed", position: 2 },
+      ],
+    });
+    let caught: unknown = null;
+    try {
+      await transitionToInReview(ctx, "uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/In Review/);
+    expect((caught as Error).message).toMatch(/tide setup/);
+    // No mutation issued.
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  test("throws when issueUpdate returns success=false", async () => {
+    const stub = makeTransitionStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "review", name: "In Review", type: "started", position: 2 },
+        { id: "done", name: "Done", type: "completed", position: 3 },
+      ],
+      mutationFailure: true,
+    });
+    let caught: unknown = null;
+    try {
+      await transitionToInReview(ctx, "uuid", stub.request);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/success=false/);
   });
 });
 
@@ -1221,5 +1401,269 @@ describe("linear.postComment", () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/success=false/);
+  });
+});
+
+interface ProvisionStateCreateCall {
+  teamId: string;
+  name: string;
+  type: string;
+  color: string;
+  position: number;
+}
+
+interface ProvisionStubOptions {
+  states?: { id: string; name: string; type: string; position: number }[];
+  knownTeamKeys?: readonly string[];
+  /** When true, createWorkflowState returns success=false. */
+  createFails?: boolean;
+}
+
+interface ProvisionStub {
+  client: ProvisionInReviewStateClient;
+  createCalls: ProvisionStateCreateCall[];
+}
+
+function buildProvisionStub(options: ProvisionStubOptions = {}): ProvisionStub {
+  const knownTeamKeys = options.knownTeamKeys ?? ["ENG"];
+  const states = options.states ?? [];
+  const createCalls: ProvisionStateCreateCall[] = [];
+  const client: ProvisionInReviewStateClient = {
+    teams: ({ filter }) => {
+      const key = filter.key.eq;
+      if (!knownTeamKeys.includes(key)) {
+        return Promise.resolve({ nodes: [] });
+      }
+      return Promise.resolve({ nodes: [{ id: `team-${key}` }] });
+    },
+    workflowStates: () => Promise.resolve({ nodes: states }),
+    createWorkflowState: (input) => {
+      createCalls.push(input);
+      return Promise.resolve({ success: !options.createFails });
+    },
+  };
+  return { client, createCalls };
+}
+
+describe("linear.provisionInReviewState", () => {
+  test("is a no-op when an `In Review` started-type state already exists", async () => {
+    const stub = buildProvisionStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "review", name: "In Review", type: "started", position: 2 },
+        { id: "done", name: "Done", type: "completed", position: 3 },
+      ],
+    });
+
+    const result = await provisionInReviewState(ctx, stub.client);
+
+    expect(result).toEqual({
+      name: IN_REVIEW_STATE_NAME,
+      created: false,
+    });
+    expect(stub.createCalls).toHaveLength(0);
+  });
+
+  test("creates `In Review` with a position strictly between In Progress and Done", async () => {
+    const stub = buildProvisionStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 2 },
+        { id: "done", name: "Done", type: "completed", position: 6 },
+      ],
+    });
+
+    const result = await provisionInReviewState(ctx, stub.client);
+
+    expect(result).toEqual({
+      name: IN_REVIEW_STATE_NAME,
+      created: true,
+    });
+    expect(stub.createCalls).toHaveLength(1);
+    const call = stub.createCalls[0];
+    if (!call) throw new Error("unreachable");
+    expect(call.teamId).toBe("team-ENG");
+    expect(call.name).toBe(IN_REVIEW_STATE_NAME);
+    expect(call.type).toBe("started");
+    expect(call.position).toBeGreaterThan(2);
+    expect(call.position).toBeLessThan(6);
+  });
+
+  test("uses lowest-position started and completed states as flanks (ignores higher-position siblings)", async () => {
+    const stub = buildProvisionStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "later", name: "Doing Later", type: "started", position: 5 },
+        { id: "done", name: "Done", type: "completed", position: 9 },
+        { id: "shipped", name: "Shipped", type: "completed", position: 12 },
+      ],
+    });
+
+    await provisionInReviewState(ctx, stub.client);
+
+    const call = stub.createCalls[0];
+    if (!call) throw new Error("unreachable");
+    // Strictly between the lowest-position started (1) and the
+    // lowest-position completed (9).
+    expect(call.position).toBeGreaterThan(1);
+    expect(call.position).toBeLessThan(9);
+  });
+
+  test("treats a same-name state with the wrong type as absent (creates a real one)", async () => {
+    // A team that has accidentally created an `In Review` `unstarted` state
+    // does not satisfy the contract — provisioning must still create a
+    // proper `started`-type state.
+    const stub = buildProvisionStub({
+      states: [
+        { id: "bogus", name: "In Review", type: "unstarted", position: 0 },
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "done", name: "Done", type: "completed", position: 2 },
+      ],
+    });
+
+    const result = await provisionInReviewState(ctx, stub.client);
+
+    expect(result.created).toBe(true);
+    expect(stub.createCalls).toHaveLength(1);
+  });
+
+  test("throws a clear error when the team has no started-type state", async () => {
+    const stub = buildProvisionStub({
+      states: [{ id: "done", name: "Done", type: "completed", position: 1 }],
+    });
+
+    let caught: unknown = null;
+    try {
+      await provisionInReviewState(ctx, stub.client);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/started/);
+    expect(stub.createCalls).toHaveLength(0);
+  });
+
+  test("throws a clear error when the team has no completed-type state", async () => {
+    const stub = buildProvisionStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+      ],
+    });
+
+    let caught: unknown = null;
+    try {
+      await provisionInReviewState(ctx, stub.client);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/completed/);
+    expect(stub.createCalls).toHaveLength(0);
+  });
+
+  test("throws when createWorkflowState returns success=false", async () => {
+    const stub = buildProvisionStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "done", name: "Done", type: "completed", position: 2 },
+      ],
+      createFails: true,
+    });
+
+    let caught: unknown = null;
+    try {
+      await provisionInReviewState(ctx, stub.client);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/success=false/);
+  });
+
+  test("throws when the configured team key does not exist", async () => {
+    const stub = buildProvisionStub({ knownTeamKeys: ["OTHER"] });
+
+    let caught: unknown = null;
+    try {
+      await provisionInReviewState(ctx, stub.client);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/team with key "ENG" not found/);
+    expect(stub.createCalls).toHaveLength(0);
+  });
+});
+
+interface AssertStubOptions {
+  states?: { id: string; name: string; type: string; position: number }[];
+  knownTeamKeys?: readonly string[];
+}
+
+function buildAssertStub(
+  options: AssertStubOptions = {}
+): AssertInReviewStatePresentClient {
+  const knownTeamKeys = options.knownTeamKeys ?? ["ENG"];
+  const states = options.states ?? [];
+  return {
+    teams: ({ filter }) => {
+      const key = filter.key.eq;
+      if (!knownTeamKeys.includes(key)) {
+        return Promise.resolve({ nodes: [] });
+      }
+      return Promise.resolve({ nodes: [{ id: `team-${key}` }] });
+    },
+    workflowStates: () => Promise.resolve({ nodes: states }),
+  };
+}
+
+describe("linear.assertInReviewStatePresent", () => {
+  test("resolves quietly when an `In Review` started-type state exists", async () => {
+    const c = buildAssertStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "review", name: "In Review", type: "started", position: 2 },
+        { id: "done", name: "Done", type: "completed", position: 3 },
+      ],
+    });
+
+    await assertInReviewStatePresent(ctx, c);
+  });
+
+  test("throws with a `tide setup` hint when `In Review` is missing", async () => {
+    const c = buildAssertStub({
+      states: [
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "done", name: "Done", type: "completed", position: 2 },
+      ],
+    });
+
+    let caught: unknown = null;
+    try {
+      await assertInReviewStatePresent(ctx, c);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/In Review/);
+    expect((caught as Error).message).toMatch(/tide setup/);
+  });
+
+  test("rejects a same-name state of the wrong type", async () => {
+    const c = buildAssertStub({
+      states: [
+        { id: "bogus", name: "In Review", type: "unstarted", position: 0 },
+        { id: "doing", name: "In Progress", type: "started", position: 1 },
+        { id: "done", name: "Done", type: "completed", position: 2 },
+      ],
+    });
+
+    let caught: unknown = null;
+    try {
+      await assertInReviewStatePresent(ctx, c);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/In Review/);
   });
 });

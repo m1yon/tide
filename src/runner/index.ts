@@ -659,21 +659,35 @@ export async function runIssueQueue(
         continue;
       }
 
-      // DONE signalled and committed → transition the sub-issue to *Done*.
-      // A failure here is an infra failure: queue aborts.
-      try {
-        await transitionToDoneFn(linearCtx, ordered.id);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log.error(`Failed to transition ${ordered.identifier} to Done: ${msg}`);
-        return {
-          completed,
-          flipped,
-          abortedAt: {
-            identifier: ordered.identifier,
-            reason: `transition to Done failed: ${msg}`,
-          },
-        };
+      // DONE signalled and committed.
+      //
+      // PRD roots: the queued unit is a Sub-issue; transition it to *Done*
+      // host-side so the user sees real-time per-iteration progress in
+      // Linear (ADR-0005). A failure here is an infra failure: queue aborts.
+      //
+      // Standalone roots: the queued unit is the Standalone Issue itself.
+      // Skip the host-side Done transition — the Standalone Issue stays at
+      // *In Progress* and the CLI orchestration layer's post-submission
+      // hook transitions it to *In Review* once the PR is opened. This
+      // prevents the misleading-state case where the parent claims Done
+      // before review.
+      if (root.kind === "prd") {
+        try {
+          await transitionToDoneFn(linearCtx, ordered.id);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.error(
+            `Failed to transition ${ordered.identifier} to Done: ${msg}`
+          );
+          return {
+            completed,
+            flipped,
+            abortedAt: {
+              identifier: ordered.identifier,
+              reason: `transition to Done failed: ${msg}`,
+            },
+          };
+        }
       }
 
       completed++;

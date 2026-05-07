@@ -1,5 +1,7 @@
 # Branch name as the sole PR↔PRD link
 
+> Status: **partially superseded by ADR-0009** for the parent's end-of-run transition. The single-PR-per-PRD model, the branch-name-as-only-link decision, and the no-closing-magic-word stance still hold. The third rejected alternative ("tide auto-transitions the **PRD** itself at end-of-clean-queue") is partially reversed at the parent level: tide now transitions **PRDs** and **Standalone Issues** to _In Review_ — not _Done_ — post-PR-submission, gated on the PR being opened, which does not race Linear's merge-driven _In Review_ → _Done_ transition.
+
 The feature branch's name is the entire mechanism by which Linear's GitHub integration connects the PR to the PRD and auto-transitions the PRD to _Done_ on merge. Tide takes the branch name verbatim from the PRD's Linear-auto-generated `branchName` field, opens the PR against the user's captured base branch, and emits no closing magic words anywhere — neither GitHub `Closes #NN` nor Linear `Fixes MEC-X`.
 
 ## Considered

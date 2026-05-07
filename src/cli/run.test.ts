@@ -232,6 +232,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -258,6 +259,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -282,6 +284,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -306,6 +309,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       pickRoot: makePickRoot(pickStub, log),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -341,6 +345,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         queueCalls.push(opts.picked);
         return Promise.resolve(0);
       },
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -381,6 +386,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         queueCalls.push(opts.picked);
         return Promise.resolve(0);
       },
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -407,6 +413,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -431,6 +438,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -451,6 +459,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -477,6 +486,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       },
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -505,6 +515,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
         ),
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
@@ -529,11 +540,80 @@ describe("tide run — early gates and Linear PRD selector", () => {
       getGhToken: makeGhToken(log),
       listPRDs,
       listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
       baseBranchShellRunner: okBaseBranchRunner,
     });
 
     expect(code).toBe(1);
     expect(stderrChunks.join("")).toContain("Linear API key invalid");
+  });
+
+  test("preflight refuses to start when `In Review` is missing — fails before build, gh, or Linear fetch", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    let ghIdentityCalls = 0;
+    let ghTokenCalls = 0;
+
+    const code = await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: () => {
+        ghIdentityCalls += 1;
+        return Promise.resolve({ owner: "m1yon", repo: "tide" });
+      },
+      getGhToken: () => {
+        ghTokenCalls += 1;
+        return Promise.resolve("ghp_test");
+      },
+      listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () =>
+        Promise.reject(
+          new Error(
+            'Linear team "ENG" has no `started`-type workflow state named "In Review". Run `tide setup` to provision it.'
+          )
+        ),
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(code).toBe(1);
+    // No further work attempted — preflight short-circuits before build,
+    // gh-identity/token resolution, and the Linear PRD fetch.
+    expect(buildStub.calls).toHaveLength(0);
+    expect(ghIdentityCalls).toBe(0);
+    expect(ghTokenCalls).toBe(0);
+    expect(listStub.calls).toHaveLength(0);
+    const stderr = stderrChunks.join("");
+    expect(stderr).toContain("In Review");
+    expect(stderr).toContain("tide setup");
+  });
+
+  test("preflight receives the LINEAR_API_KEY and team key from config", async () => {
+    const log: CallLog = { events: [] };
+    const buildStub: BuildStub = { exitCode: 0, calls: [] };
+    const listStub: ListPRDsStub = { prds: [], calls: [] };
+    const calls: { apiKey: string; teamKey: string }[] = [];
+
+    await tideRun({
+      repoRoot,
+      stdout: captureStdout,
+      stderr: captureStderr,
+      build: makeBuild(buildStub, log),
+      getGhIdentity: makeGhIdentity(log),
+      getGhToken: makeGhToken(log),
+      listPRDs: makeListPRDs(listStub, log),
+      listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: (ctx) => {
+        calls.push({ apiKey: ctx.apiKey, teamKey: ctx.teamKey });
+        return Promise.resolve();
+      },
+      baseBranchShellRunner: okBaseBranchRunner,
+    });
+
+    expect(calls).toEqual([{ apiKey: "lk", teamKey: "ENG" }]);
   });
 });
 
@@ -1905,5 +1985,402 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     });
 
     expect(capturedSubIssues).toEqual([]);
+  });
+});
+
+describe("runQueueAfterPick — post-submission In Review hook", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  function openedTail(): Promise<PrTailStepResult> {
+    return Promise.resolve({
+      outcome: { kind: "opened", url: "https://example/pr/1" },
+      outroMessage: "Done. PR opened: https://example/pr/1",
+      exitCode: 0,
+    } satisfies PrTailStepResult);
+  }
+
+  function optedOutTail(): Promise<PrTailStepResult> {
+    return Promise.resolve({
+      outcome: { kind: "opted-out" },
+      outroMessage: "Done. PR step skipped (you opted out at pre-flight).",
+      exitCode: 0,
+    } satisfies PrTailStepResult);
+  }
+
+  test("clean queue + PR opened → transitions the picked PRD to In Review", async () => {
+    const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
+    const calls: { ctx: LinearContext; issueId: string }[] = [];
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: (ctx, issueId) => {
+        calls.push({ ctx, issueId });
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      { ctx: { apiKey: "lk", teamKey: "ENG" }, issueId: "uuid-eng-1" },
+    ]);
+  });
+
+  test("clean queue + no PR opened → does not transition; existing no-merge warning still fires", async () => {
+    const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: optedOutTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("PRD ENG-1 will not auto-transition");
+  });
+
+  test("dirty queue (flipped > 0) + PR opened → does not transition; emits skip warning", async () => {
+    const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 1 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("ENG-1");
+    expect(out).toContain("In Review");
+  });
+
+  test("dirty queue + no PR → does not transition; existing no-merge warning still fires", async () => {
+    const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: optedOutTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("PRD ENG-1 will not auto-transition");
+  });
+
+  test("In Review transition failure preserves the PR and earlier Linear writes; warning surfaces in summary", async () => {
+    const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () =>
+        Promise.reject(new Error("Linear API timeout")),
+    });
+
+    // PR was opened — exit code stays 0 even though the In Review
+    // transition failed afterwards.
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    // PR URL still surfaced (PR not unwound).
+    expect(out).toContain("https://example/pr/1");
+    // Failure surfaces in the run output.
+    expect(out).toContain("In Review");
+    expect(out).toContain("Linear API timeout");
+  });
+});
+
+describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue root)", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  function openedTail(): Promise<PrTailStepResult> {
+    return Promise.resolve({
+      outcome: { kind: "opened", url: "https://example/pr/1" },
+      outroMessage: "Done. PR opened: https://example/pr/1",
+      exitCode: 0,
+    } satisfies PrTailStepResult);
+  }
+
+  function optedOutTail(): Promise<PrTailStepResult> {
+    return Promise.resolve({
+      outcome: { kind: "opted-out" },
+      outroMessage: "Done. PR step skipped (you opted out at pre-flight).",
+      exitCode: 0,
+    } satisfies PrTailStepResult);
+  }
+
+  test("clean iteration + PR opened → transitions the Standalone Issue to In Review", async () => {
+    const issue = makeStandaloneIssue({
+      id: "uuid-iss-7",
+      identifier: "ENG-7",
+    });
+    const calls: { ctx: LinearContext; issueId: string }[] = [];
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: (ctx, issueId) => {
+        calls.push({ ctx, issueId });
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      { ctx: { apiKey: "lk", teamKey: "ENG" }, issueId: "uuid-iss-7" },
+    ]);
+  });
+
+  test("clean iteration + no PR opened → does NOT transition; existing no-merge warning still fires", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: optedOutTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Issue ENG-7 will not auto-transition");
+  });
+
+  test("dirty iteration (flipped > 0) + PR opened → does NOT transition", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    // The existing standalone BLOCKED warning communicates the skip; no
+    // new "not transitioned" warning is required for this cell.
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Issue ENG-7 is flipped to `ready-for-human`");
+  });
+
+  test("dirty iteration + no PR → does NOT transition", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+    let calls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 0, flipped: 1 }),
+      runPrTailStep: optedOutTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(calls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("Issue ENG-7 is flipped to `ready-for-human`");
+    expect(out).toContain("Issue ENG-7 will not auto-transition");
+  });
+
+  test("In Review transition failure preserves the PR and earlier Linear writes; warning surfaces in summary", async () => {
+    const issue = makeStandaloneIssue({ identifier: "ENG-7" });
+
+    const code = await runQueueAfterPick({
+      picked: standaloneRoot(issue),
+      ghRepo: { owner: "acme", repo: "widget" },
+      baseBranch: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      runIssueQueue: () => Promise.resolve({ completed: 1, flipped: 0 }),
+      runPrTailStep: openedTail,
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () =>
+        Promise.reject(new Error("Linear API timeout")),
+    });
+
+    // PR was opened — exit code stays 0 even though the In Review
+    // transition failed afterwards.
+    expect(code).toBe(0);
+    const out = stdoutChunks.join("");
+    // PR URL still surfaced (PR not unwound).
+    expect(out).toContain("https://example/pr/1");
+    // Failure surfaces in the run output, citing both the issue identifier
+    // and the In Review transition.
+    expect(out).toContain("ENG-7");
+    expect(out).toContain("In Review");
+    expect(out).toContain("Linear API timeout");
   });
 });
