@@ -3,14 +3,15 @@ import {
   buildPrPromptArgs,
   buildPrTitle,
   countCommitsAhead,
-  resolveBaseBranch,
+  resolveCurrentBranch,
+  resolveOriginHead,
   runPrSubmission,
   type ShellResult,
   type ShellRunner,
 } from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
-import type { SandboxRunOptions, SandboxRunResult } from "@ai-hero/sandcastle";
-import type { SandboxRunFn } from "../runner/index.ts";
+import type { RunOptions, RunResult } from "@ai-hero/sandcastle";
+import type { SandcastleRunFn } from "../runner/index.ts";
 
 interface ShellCall {
   cmd: string;
@@ -59,14 +60,15 @@ const baseConfig: TideConfig = {
 
 const baseGhRepo = { owner: "acme", repo: "widget" };
 
-const baseSandboxRun: SandboxRunFn = () =>
+const baseSandcastleRun: SandcastleRunFn = () =>
   Promise.resolve({
     iterations: [],
     stdout: "",
     commits: [],
-  } satisfies SandboxRunResult);
+    branch: "feature/per-32",
+  } satisfies RunResult);
 
-describe("resolveBaseBranch", () => {
+describe("resolveCurrentBranch", () => {
   it("returns the trimmed branch name on success", async () => {
     const { runner } = buildShellRunner([
       {
@@ -75,7 +77,7 @@ describe("resolveBaseBranch", () => {
         result: { exitCode: 0, stdout: "main\n", stderr: "" },
       },
     ]);
-    const branch = await resolveBaseBranch("/tmp/repo", runner);
+    const branch = await resolveCurrentBranch("/tmp/repo", runner);
     expect(branch).toBe("main");
   });
 
@@ -87,7 +89,7 @@ describe("resolveBaseBranch", () => {
         result: { exitCode: 0, stdout: "HEAD\n", stderr: "" },
       },
     ]);
-    const err = await captureError(resolveBaseBranch("/tmp/repo", runner));
+    const err = await captureError(resolveCurrentBranch("/tmp/repo", runner));
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/detached HEAD/);
   });
@@ -99,9 +101,66 @@ describe("resolveBaseBranch", () => {
         result: { exitCode: 128, stdout: "", stderr: "fatal: not a git repo" },
       },
     ]);
-    const err = await captureError(resolveBaseBranch("/tmp/repo", runner));
+    const err = await captureError(resolveCurrentBranch("/tmp/repo", runner));
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/git rev-parse.*failed/);
+  });
+});
+
+describe("resolveOriginHead", () => {
+  it("returns the branch name with the `origin/` prefix stripped", async () => {
+    const { runner, calls } = buildShellRunner([
+      {
+        match: (c) =>
+          c.cmd === "git" &&
+          c.args.join(" ") === "rev-parse --abbrev-ref origin/HEAD",
+        result: { exitCode: 0, stdout: "origin/main\n", stderr: "" },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBe("main");
+    expect(calls[0]?.args).toEqual([
+      "rev-parse",
+      "--abbrev-ref",
+      "origin/HEAD",
+    ]);
+  });
+
+  it("returns undefined when git exits non-zero (origin/HEAD unset is legal)", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git",
+        result: {
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: ambiguous argument 'origin/HEAD'",
+        },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBeUndefined();
+  });
+
+  it("returns undefined when stdout resolves to the bare 'HEAD' sentinel", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git",
+        result: { exitCode: 0, stdout: "HEAD\n", stderr: "" },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBeUndefined();
+  });
+
+  it("returns undefined when stdout is empty", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git",
+        result: { exitCode: 0, stdout: "\n", stderr: "" },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBeUndefined();
   });
 });
 
@@ -167,14 +226,15 @@ describe("runPrSubmission", () => {
       },
     ]);
 
-    let receivedRunOptions: SandboxRunOptions | undefined;
-    const sandboxRun: SandboxRunFn = (opts) => {
+    let receivedRunOptions: RunOptions | undefined;
+    const sandcastleRun: SandcastleRunFn = (opts) => {
       receivedRunOptions = opts;
       return Promise.resolve({
         iterations: [],
         stdout: "",
         commits: [],
-      } satisfies SandboxRunResult);
+        branch: "feature/per-32",
+      } satisfies RunResult);
     };
 
     const result = await runPrSubmission({
@@ -189,10 +249,11 @@ describe("runPrSubmission", () => {
         { number: 9, title: "Pre-flight clack confirm" },
       ],
       repoRoot: "/repo",
+      featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
       config: baseConfig,
       sandboxEnv: {},
       shellRunner: runner,
-      sandboxRun,
+      sandcastleRun,
     });
 
     expect(result).toEqual({
@@ -204,11 +265,13 @@ describe("runPrSubmission", () => {
     // per-iteration. Only `gh pr list` runs through the shell.
     expect(calls.every((c) => c.cmd !== "git")).toBe(true);
 
-    // The iteration was fired with the right shape. Branch + baseBranch are
-    // bound at `createSandbox` time, not on the run-options shape, so the
-    // run options no longer carry a `branchStrategy` field.
+    // The iteration was fired with the right shape. The PR-submission
+    // iteration runs directly inside the Feature worktree under sandcastle's
+    // `head` branch strategy — no per-call worktree, no merge step.
     expect(receivedRunOptions).toBeDefined();
     if (!receivedRunOptions) throw new Error("missing run options");
+    expect(receivedRunOptions.branchStrategy).toEqual({ type: "head" });
+    expect(receivedRunOptions.cwd).toBe("/repo/.tide/worktrees/feature-per-32");
     expect(receivedRunOptions.maxIterations).toBe(1);
     expect(receivedRunOptions.completionSignal).toEqual([
       "<promise>DONE</promise>",
@@ -289,10 +352,11 @@ describe("runPrSubmission", () => {
         rootUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
+        featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandboxRun: baseSandboxRun,
+        sandcastleRun: baseSandcastleRun,
       })
     );
     expect(err).toBeInstanceOf(Error);
@@ -302,7 +366,7 @@ describe("runPrSubmission", () => {
   it("wraps sandcastle thrown errors with a tide-prefixed message", async () => {
     const { runner } = buildShellRunner([]);
 
-    const sandboxRun: SandboxRunFn = () =>
+    const sandcastleRun: SandcastleRunFn = () =>
       Promise.reject(new Error("sandbox failed to start"));
 
     const err = await captureError(
@@ -315,10 +379,11 @@ describe("runPrSubmission", () => {
         rootUrl: "https://linear.app/acme/issue/MEC-123",
         subIssues: [],
         repoRoot: "/repo",
+        featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandboxRun,
+        sandcastleRun,
       })
     );
     expect(err).toBeInstanceOf(Error);
@@ -346,22 +411,22 @@ describe("buildPrPromptArgs", () => {
     });
     expect(Object.keys(args).sort()).toEqual(
       [
+        "BASE_BRANCH",
+        "FEATURE_BRANCH",
         "PR_TITLE",
         "REPO_NAME",
         "REPO_OWNER",
         "ROOT_ID",
         "ROOT_TITLE",
         "ROOT_URL",
-        "SOURCE_BRANCH",
         "SUB_ISSUES_BLOCK",
-        "TARGET_BRANCH",
       ].sort()
     );
     expect(args.ROOT_ID).toBe("MEC-123");
     expect(args.ROOT_TITLE).toBe("PRD: example feature");
     expect(args.ROOT_URL).toBe("https://linear.app/acme/issue/MEC-123");
-    expect(args.SOURCE_BRANCH).toBe("feature/per-32");
-    expect(args.TARGET_BRANCH).toBe("master");
+    expect(args.FEATURE_BRANCH).toBe("feature/per-32");
+    expect(args.BASE_BRANCH).toBe("master");
     expect(args.REPO_OWNER).toBe("acme");
     expect(args.REPO_NAME).toBe("widget");
     expect(args.PR_TITLE).toBe("[MEC-123] PRD: example feature");

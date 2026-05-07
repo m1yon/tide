@@ -61,8 +61,10 @@ describe("tide init", () => {
     expect(prompt).toContain("{{ISSUE_ID}}");
     expect(prompt).toContain("{{ISSUE_TITLE}}");
     expect(prompt).toContain("{{ISSUE_CONTENT}}");
-    expect(prompt).toContain("{{SOURCE_BRANCH}}");
-    expect(prompt).toContain("{{TARGET_BRANCH}}");
+    expect(prompt).toContain("{{FEATURE_BRANCH}}");
+    expect(prompt).toContain("{{BASE_BRANCH}}");
+    expect(prompt).not.toContain("{{SOURCE_BRANCH}}");
+    expect(prompt).not.toContain("{{TARGET_BRANCH}}");
     // No parent-PRD references — Standalone Issues run without one.
     expect(prompt).not.toContain("{{PRD_CONTENT}}");
     expect(prompt).not.toContain("{{PARENT_ID}}");
@@ -98,8 +100,10 @@ describe("tide init", () => {
     expect(prompt).toContain("{{ISSUE_CONTENT}}");
     expect(prompt).toContain("{{PRD_CONTENT}}");
     expect(prompt).toContain("{{PARENT_ID}}");
-    expect(prompt).toContain("{{SOURCE_BRANCH}}");
-    expect(prompt).toContain("{{TARGET_BRANCH}}");
+    expect(prompt).toContain("{{FEATURE_BRANCH}}");
+    expect(prompt).toContain("{{BASE_BRANCH}}");
+    expect(prompt).not.toContain("{{SOURCE_BRANCH}}");
+    expect(prompt).not.toContain("{{TARGET_BRANCH}}");
   });
 
   test(".env.example documents the required key plus both auth alternatives", () => {

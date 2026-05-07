@@ -7,13 +7,17 @@
 //                     sub-sections (Comments omitted if there are none)
 //   - PRD_CONTENT:    the parent PRD's raw markdown body (PRD root only)
 //   - PARENT_ID:      the parent PRD's Linear identifier (PRD root only)
+//   - FEATURE_BRANCH: the Feature worktree's branch (the branch the agent
+//                     commits to)
+//   - BASE_BRANCH:    the user's PR target branch
 //
 // `parent` is optional. When omitted (Standalone Issue root), `PRD_CONTENT`
 // and `PARENT_ID` are omitted from the rendered args.
 //
-// SOURCE_BRANCH and TARGET_BRANCH are NOT included: sandcastle injects them
-// as built-in prompt arguments (driven by `branch`/`baseBranch` passed to
-// `createSandbox`) and rejects any attempt to override them via promptArgs.
+// `FEATURE_BRANCH` / `BASE_BRANCH` are tide-owned and supersede sandcastle's
+// built-in `{{SOURCE_BRANCH}}` / `{{TARGET_BRANCH}}` placeholders, whose
+// meanings flip between the `branch` and `merge-to-head` strategies. See
+// ADR-0014.
 //
 // Markdown special characters in body / comments pass through unmodified
 // (no escaping). An empty body still renders the `Body` sub-section with a
@@ -29,6 +33,10 @@ export interface IssueContent {
 export interface BuildPromptArgsInput {
   issue: IssueContent;
   parent?: IssueContent;
+  /** The Feature worktree's branch — the branch the agent commits to. */
+  featureBranch: string;
+  /** The user's PR target branch. */
+  baseBranch: string;
 }
 
 export type PromptArgsRecord = Record<string, string | number | boolean>;
@@ -60,11 +68,13 @@ function renderIssueContent(issue: IssueContent): string {
 }
 
 export function buildPromptArgs(input: BuildPromptArgsInput): PromptArgsRecord {
-  const { issue, parent } = input;
+  const { issue, parent, featureBranch, baseBranch } = input;
   const args: PromptArgsRecord = {
     ISSUE_ID: issue.identifier,
     ISSUE_TITLE: issue.title,
     ISSUE_CONTENT: renderIssueContent(issue),
+    FEATURE_BRANCH: featureBranch,
+    BASE_BRANCH: baseBranch,
   };
   if (parent !== undefined) {
     args.PRD_CONTENT = parent.body;
