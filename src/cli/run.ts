@@ -40,6 +40,12 @@ import {
   type BranchOverrideOutcome,
   type PromptBranchOverrideInput,
 } from "../branch-override/index.ts";
+import {
+  decidePrTarget,
+  promptPrTarget as defaultPromptPrTarget,
+  type PrTargetOutcome,
+  type PromptPrTargetInput,
+} from "../pr-target/index.ts";
 import { createBridgeIfMissing } from "../sandcastle-bridge/index.ts";
 import { build as defaultBuild, type BuildOptions } from "./build.ts";
 import { loadConfig, type TideConfig } from "../config-loader/index.ts";
@@ -73,7 +79,8 @@ import {
 } from "../linear/index.ts";
 import {
   countCommitsAhead as defaultCountCommitsAhead,
-  resolveBaseBranch,
+  resolveCurrentBranch,
+  resolveOriginHead,
   runPrSubmission as defaultRunPrSubmission,
   type PrSubmissionResult,
   type RunPrSubmissionOptions,
@@ -150,18 +157,34 @@ export interface RunOptions {
    */
   runQueueAfterPick?: (opts: RunQueueAfterPickOptions) => Promise<number>;
   /**
-   * Test seam: shell runner used for the host-side base-branch capture
+   * Test seam: shell runner used for the host-side current-branch capture
    * (`git rev-parse --abbrev-ref HEAD`). Defaults to a child_process spawn
    * inside the pr-submission module.
    */
-  baseBranchShellRunner?: ShellRunner;
+  currentBranchShellRunner?: ShellRunner;
+  /**
+   * Test seam: shell runner used for the host-side `origin/HEAD` capture
+   * (`git rev-parse --abbrev-ref origin/HEAD`). Defaults to a child_process
+   * spawn inside the pr-submission module. A non-zero exit here is legal
+   * (origin/HEAD-unset clones); the resolver returns `undefined` and the
+   * PR-target prompt fires unconditionally with no default.
+   */
+  originHeadShellRunner?: ShellRunner;
 }
 
 export interface RunQueueAfterPickOptions {
   /** Tagged-union root reference returned by the picker. */
   picked: RootRef;
   ghRepo: GhRepo;
-  baseBranch: string;
+  /** The user's current branch (`git rev-parse --abbrev-ref HEAD`) — input
+   * to both the **Branch override** decision and the **PR target branch**
+   * decision. Independent of `originHead`. */
+  currentBranch: string;
+  /** The remote's default branch (`git rev-parse --abbrev-ref origin/HEAD`,
+   * with `origin/` stripped) or `undefined` when `origin/HEAD` is unset.
+   * Input to the **PR target branch** decision; the prompt fires
+   * unconditionally with no default when `undefined`. */
+  originHead: string | undefined;
   linearCtx: LinearContext;
   repoRoot: string;
   config: TideConfig;
@@ -220,6 +243,15 @@ export interface RunQueueAfterPickOptions {
   promptBranchOverride?: (
     input: PromptBranchOverrideInput
   ) => Promise<BranchOverrideOutcome>;
+  /**
+   * Test seam — defaults to the `pr-target` module's clack `select`+`text`
+   * wrapper. Fires only when the user's current branch differs from
+   * `origin/HEAD` (or unconditionally when `origin/HEAD` is unset); tests
+   * stub it to drive the prompted-default, prompted-typed-valid,
+   * prompted-typed-invalid, prompted-cancel, and origin-HEAD-unset paths
+   * without rendering UI.
+   */
+  promptPrTarget?: (input: PromptPrTargetInput) => Promise<PrTargetOutcome>;
 }
 
 export interface RunPrTailStepOptions {
@@ -421,6 +453,7 @@ export async function runQueueAfterPick(
   const createWorktreeFn = opts.createWorktree ?? defaultCreateWorktree;
   const promptBranchOverrideFn =
     opts.promptBranchOverride ?? defaultPromptBranchOverride;
+  const promptPrTargetFn = opts.promptPrTarget ?? defaultPromptPrTarget;
 
   const root = rootMetaFromPicked(opts.picked);
 
@@ -432,17 +465,17 @@ export async function runQueueAfterPick(
   // becomes the Feature worktree's branch. Replaces the prior pre-flight
   // gate that errored out when the user's current branch was the picked
   // root's feature branch.
-  const decision = decideBranchOverride({
-    currentBranch: opts.baseBranch,
+  const overrideDecision = decideBranchOverride({
+    currentBranch: opts.currentBranch,
     pickedBranchName: root.branchName,
   });
   let featureBranch: string;
-  if (decision.kind === "silent") {
-    featureBranch = decision.branch;
+  if (overrideDecision.kind === "silent") {
+    featureBranch = overrideDecision.branch;
   } else {
     const result = await promptBranchOverrideFn({
-      linearBranch: decision.linearBranch,
-      currentBranch: decision.currentBranch,
+      linearBranch: overrideDecision.linearBranch,
+      currentBranch: overrideDecision.currentBranch,
     });
     if (result.kind === "cancelled") {
       cancel("Cancelled at branch selection.");
@@ -455,6 +488,34 @@ export async function runQueueAfterPick(
   // transition that won't fire (Linear's GitHub integration cannot match
   // a non-Linear branch back to the root).
   const overrideTaken = featureBranch !== root.branchName;
+
+  // PR target branch: smart-silent when the user's current branch matches
+  // `origin/HEAD` (typical: invoked from trunk). Otherwise prompt with
+  // `origin/HEAD` as the default; user-typed alternatives are validated
+  // against the local repo. When `origin/HEAD` is unset the prompt fires
+  // unconditionally with no default. See ADR-0016 — splitting this from
+  // the override decision is what makes the override path actually open a
+  // PR (the conflated single-capture model produced `featureBranch ===
+  // baseBranch` on the override-take path, silently skipping PR creation
+  // via the rev-list gate).
+  const prTargetDecision = decidePrTarget({
+    currentBranch: opts.currentBranch,
+    originHead: opts.originHead,
+  });
+  let baseBranch: string;
+  if (prTargetDecision.kind === "silent") {
+    baseBranch = prTargetDecision.branch;
+  } else {
+    const result = await promptPrTargetFn({
+      defaultBranch: prTargetDecision.defaultBranch,
+      repoRoot: opts.repoRoot,
+    });
+    if (result.kind === "cancelled") {
+      cancel("Cancelled at PR target selection.");
+      return 0;
+    }
+    baseBranch = result.branch;
+  }
 
   let orderedIssues: OrderedIssue[];
 
@@ -592,7 +653,7 @@ export async function runQueueAfterPick(
       branchStrategy: {
         type: "branch",
         branch: featureBranch,
-        baseBranch: opts.baseBranch,
+        baseBranch,
       },
       cwd: opts.repoRoot,
     });
@@ -610,7 +671,7 @@ export async function runQueueAfterPick(
         : { kind: "standalone" },
     orderedIssues,
     branch: featureBranch,
-    baseBranch: opts.baseBranch,
+    baseBranch,
     linearCtx: opts.linearCtx,
     repoRoot: opts.repoRoot,
     featureWorktreePath: featureWorktree.worktreePath,
@@ -650,7 +711,7 @@ export async function runQueueAfterPick(
     prCreationConfirmed,
     ghRepo: opts.ghRepo,
     branch: featureBranch,
-    baseBranch: opts.baseBranch,
+    baseBranch,
     rootIdentifier: root.identifier,
     rootTitle: root.title,
     rootUrl: root.url,
@@ -712,24 +773,29 @@ export async function runQueueAfterPick(
   // opened on this run, so Linear's GitHub integration won't auto-transition
   // the root to Done on merge. Surface this as a yellow warning so the user
   // can transition manually if they're shipping outside this run.
-  //
-  // Override-induced Done warning: when a PR *was* opened but the user took
-  // the Branch override, the PR's branch is not Linear's auto-generated
-  // `branchName`, so Linear's GitHub integration cannot match the PR back
-  // to the root on merge — the merge-driven *In Review → Done* transition
-  // will not fire. The host-driven *Triage → In Progress → In Review*
-  // chain (ADR-0009) is branch-name-independent and continues to fire.
-  // Suppressed when no PR was opened: the no-merge warning above already
-  // covers manual-transition messaging in that case.
   if (tail.outcome.kind !== "opened") {
     const label = opts.picked.kind === "prd" ? "PRD" : "Issue";
     log.warn(
       `${label} ${root.identifier} will not auto-transition. Transition manually in Linear if shipping outside this run.`
     );
-  } else if (overrideTaken) {
+  }
+
+  // Override-active warning: when the user took the Branch override, the
+  // eventual PR's head branch is not Linear's auto-generated `branchName`,
+  // so Linear's GitHub integration cannot match the PR back to the root on
+  // merge — the merge-driven *In Review → Done* transition will not fire.
+  // The host-driven *Triage → In Progress → In Review* chain (ADR-0009) is
+  // branch-name-independent and continues to fire.
+  //
+  // Per ADR-0016 the warning fires whenever override was taken, regardless
+  // of tail outcome — the prior `tail.outcome.kind === 'opened'` gate
+  // existed to suppress this on the silent-no-PR path that the conflated
+  // single-capture model produced; that path is gone with the PR-target
+  // split, so the warning is unconditional here.
+  if (overrideTaken) {
     const label = opts.picked.kind === "prd" ? "PRD" : "Issue";
     log.warn(
-      `${label} ${root.identifier}: Branch override active — PR opened on ${featureBranch}, not Linear's ${root.branchName}. Linear cannot match the branch back to the root, so the merge-driven In Review → Done transition will not fire. Transition manually in Linear after merge.`
+      `${label} ${root.identifier}: Branch override active — feature branch ${featureBranch}, not Linear's ${root.branchName}. Linear cannot match the branch back to the root, so the merge-driven In Review → Done transition will not fire. Transition manually in Linear after merge.`
     );
   }
 
@@ -760,21 +826,32 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     return 1;
   }
 
-  // Capture the base branch *before* any other work. This is the branch the
-  // user invoked `tide run` from — it becomes the base for the PR opened at
-  // the tail of the run. Failing fast on detached HEAD here avoids burning a
+  // Capture the user's current branch *before* any other work. Used as the
+  // input to both the **Branch override** decision (vs the picked root's
+  // Linear `branchName`) and the **PR target branch** decision (vs
+  // `origin/HEAD`). Failing fast on detached HEAD here avoids burning a
   // queue's worth of work only to discover the PR step can't proceed.
-  let baseBranch: string;
+  let currentBranch: string;
   try {
-    baseBranch = await resolveBaseBranch(
+    currentBranch = await resolveCurrentBranch(
       repoRoot,
-      options.baseBranchShellRunner
+      options.currentBranchShellRunner
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
     return 1;
   }
+
+  // Capture `origin/HEAD` (the remote's default branch) for the **PR target
+  // branch** decision. Best-effort — origin/HEAD-unset is legal (older
+  // clones, certain CI setups), in which case the resolver returns
+  // `undefined` and the PR-target prompt fires unconditionally with no
+  // default. See ADR-0016.
+  const originHead = await resolveOriginHead(
+    repoRoot,
+    options.originHeadShellRunner
+  );
 
   // Load config + env up front so failures surface before any UI.
   let config: TideConfig;
@@ -916,7 +993,8 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   return await runQueueAfterPickFn({
     picked,
     ghRepo: { owner: ghIdentity.owner, repo: ghIdentity.repo },
-    baseBranch,
+    currentBranch,
+    originHead,
     linearCtx,
     repoRoot,
     config,

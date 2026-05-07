@@ -3,7 +3,8 @@ import {
   buildPrPromptArgs,
   buildPrTitle,
   countCommitsAhead,
-  resolveBaseBranch,
+  resolveCurrentBranch,
+  resolveOriginHead,
   runPrSubmission,
   type ShellResult,
   type ShellRunner,
@@ -67,7 +68,7 @@ const baseSandcastleRun: SandcastleRunFn = () =>
     branch: "feature/per-32",
   } satisfies RunResult);
 
-describe("resolveBaseBranch", () => {
+describe("resolveCurrentBranch", () => {
   it("returns the trimmed branch name on success", async () => {
     const { runner } = buildShellRunner([
       {
@@ -76,7 +77,7 @@ describe("resolveBaseBranch", () => {
         result: { exitCode: 0, stdout: "main\n", stderr: "" },
       },
     ]);
-    const branch = await resolveBaseBranch("/tmp/repo", runner);
+    const branch = await resolveCurrentBranch("/tmp/repo", runner);
     expect(branch).toBe("main");
   });
 
@@ -88,7 +89,7 @@ describe("resolveBaseBranch", () => {
         result: { exitCode: 0, stdout: "HEAD\n", stderr: "" },
       },
     ]);
-    const err = await captureError(resolveBaseBranch("/tmp/repo", runner));
+    const err = await captureError(resolveCurrentBranch("/tmp/repo", runner));
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/detached HEAD/);
   });
@@ -100,9 +101,66 @@ describe("resolveBaseBranch", () => {
         result: { exitCode: 128, stdout: "", stderr: "fatal: not a git repo" },
       },
     ]);
-    const err = await captureError(resolveBaseBranch("/tmp/repo", runner));
+    const err = await captureError(resolveCurrentBranch("/tmp/repo", runner));
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/git rev-parse.*failed/);
+  });
+});
+
+describe("resolveOriginHead", () => {
+  it("returns the branch name with the `origin/` prefix stripped", async () => {
+    const { runner, calls } = buildShellRunner([
+      {
+        match: (c) =>
+          c.cmd === "git" &&
+          c.args.join(" ") === "rev-parse --abbrev-ref origin/HEAD",
+        result: { exitCode: 0, stdout: "origin/main\n", stderr: "" },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBe("main");
+    expect(calls[0]?.args).toEqual([
+      "rev-parse",
+      "--abbrev-ref",
+      "origin/HEAD",
+    ]);
+  });
+
+  it("returns undefined when git exits non-zero (origin/HEAD unset is legal)", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git",
+        result: {
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: ambiguous argument 'origin/HEAD'",
+        },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBeUndefined();
+  });
+
+  it("returns undefined when stdout resolves to the bare 'HEAD' sentinel", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git",
+        result: { exitCode: 0, stdout: "HEAD\n", stderr: "" },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBeUndefined();
+  });
+
+  it("returns undefined when stdout is empty", async () => {
+    const { runner } = buildShellRunner([
+      {
+        match: (c) => c.cmd === "git",
+        result: { exitCode: 0, stdout: "\n", stderr: "" },
+      },
+    ]);
+    const branch = await resolveOriginHead("/tmp/repo", runner);
+    expect(branch).toBeUndefined();
   });
 });
 

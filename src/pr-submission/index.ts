@@ -147,11 +147,13 @@ export async function countCommitsAhead(
 }
 
 /**
- * Capture the current branch via `git rev-parse --abbrev-ref HEAD`. Throws
- * with a clear message on detached HEAD ("HEAD") so the caller can fail fast
- * before any Sandcastle work runs.
+ * Capture the user's current branch via `git rev-parse --abbrev-ref HEAD`.
+ * Throws with a clear message on detached HEAD ("HEAD") so the caller can
+ * fail fast before any Sandcastle work runs. Used host-side as the
+ * `currentBranch` input to the **Branch override** decision; the **PR target
+ * branch** is captured separately via `resolveOriginHead` (see ADR-0016).
  */
-export async function resolveBaseBranch(
+export async function resolveCurrentBranch(
   repoRoot: string,
   shellRunner: ShellRunner = defaultShellRunner
 ): Promise<string> {
@@ -173,6 +175,35 @@ export async function resolveBaseBranch(
     );
   }
   return branch;
+}
+
+/**
+ * Capture the remote's default branch via
+ * `git rev-parse --abbrev-ref origin/HEAD`, returning the branch name with
+ * the leading `origin/` prefix stripped. Returns `undefined` when
+ * `origin/HEAD` is unset (older clones, certain CI setups, or `git remote
+ * add origin` without a subsequent `git remote set-head`) — this is a legal
+ * state and never throws. The CLI orchestration treats the absence as
+ * "prompt unconditionally with no default" rather than falling back to the
+ * user's current branch (the conflation that ADR-0016 splits).
+ */
+export async function resolveOriginHead(
+  repoRoot: string,
+  shellRunner: ShellRunner = defaultShellRunner
+): Promise<string | undefined> {
+  const r = await shellRunner(
+    "git",
+    ["rev-parse", "--abbrev-ref", "origin/HEAD"],
+    repoRoot
+  );
+  if (r.exitCode !== 0) return undefined;
+  const out = r.stdout.trim();
+  if (out === "" || out === "HEAD") return undefined;
+  const stripped = out.startsWith("origin/")
+    ? out.slice("origin/".length)
+    : out;
+  if (stripped === "" || stripped === "HEAD") return undefined;
+  return stripped;
 }
 
 // Bundled, interface-emphasizing PR template. Renders five body sections

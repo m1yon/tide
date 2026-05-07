@@ -7,6 +7,10 @@ import type {
   BranchOverrideOutcome,
   PromptBranchOverrideInput,
 } from "../branch-override/index.ts";
+import type {
+  PromptPrTargetInput,
+  PrTargetOutcome,
+} from "../pr-target/index.ts";
 import {
   buildOrderedQueue,
   runPrTailStep,
@@ -75,6 +79,27 @@ function makePromptOverrideStub(
     return Promise.resolve({
       kind: "chosen",
       branch: pick === "linear" ? input.linearBranch : input.currentBranch,
+    });
+  };
+}
+
+/**
+ * Stub the `pr-target.promptPrTarget` test seam used by `runQueueAfterPick`.
+ * Tests that don't care about the PR-target path can pass `currentBranch ===
+ * originHead` so the silent path fires and this stub is never invoked. Tests
+ * that drive the prompt provide an explicit `branch` (e.g. the `originHead`
+ * default) or `"cancel"` for the cancellation path.
+ */
+function makePromptPrTargetStub(
+  options: { branch?: string; cancel?: boolean } = {}
+): (input: PromptPrTargetInput) => Promise<PrTargetOutcome> {
+  return (input) => {
+    if (options.cancel === true) {
+      return Promise.resolve({ kind: "cancelled" });
+    }
+    return Promise.resolve({
+      kind: "chosen",
+      branch: options.branch ?? input.defaultBranch ?? "master",
     });
   };
 }
@@ -229,11 +254,21 @@ function constShellRunner(result: ShellResult): ShellRunner {
 }
 
 // Stub for the host-side `git rev-parse --abbrev-ref HEAD` call that
-// resolveBaseBranch makes before any other work. Tests that don't care
-// about base-branch capture use this to keep the early gate happy.
-const okBaseBranchRunner = constShellRunner({
+// resolveCurrentBranch makes before any other work. Tests that don't care
+// about current-branch capture use this to keep the early gate happy.
+const okCurrentBranchRunner = constShellRunner({
   exitCode: 0,
   stdout: "master\n",
+  stderr: "",
+});
+
+// Stub for the host-side `git rev-parse --abbrev-ref origin/HEAD` call
+// resolveOriginHead makes after the current-branch capture. Defaults to
+// origin/master so the smart-silent PR-target path fires for tests that
+// don't care about it (currentBranch === originHead).
+const okOriginHeadRunner = constShellRunner({
+  exitCode: 0,
+  stdout: "origin/master\n",
   stderr: "",
 });
 
@@ -288,7 +323,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(0);
@@ -315,7 +351,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     const call = buildStub.calls[0];
@@ -340,7 +377,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(2);
@@ -365,7 +403,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listStandaloneIssues: () => Promise.resolve([]),
       pickRoot: makePickRoot(pickStub, log),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(0);
@@ -391,7 +430,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
         return Promise.resolve([]);
       },
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     // makeGhIdentity returns { owner: "m1yon", repo: "tide" }; both list
@@ -430,7 +470,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
         listPRDs: makeListPRDs(listStub, log),
         listStandaloneIssues: () => Promise.resolve([]),
         assertInReviewStatePresent: () => Promise.resolve(),
-        baseBranchShellRunner: okBaseBranchRunner,
+        currentBranchShellRunner: okCurrentBranchRunner,
+        originHeadShellRunner: okOriginHeadRunner,
       });
     } finally {
       process.stdout.write = originalWrite;
@@ -475,7 +516,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
         return Promise.resolve(0);
       },
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(0);
@@ -516,7 +558,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
         return Promise.resolve(0);
       },
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(0);
@@ -543,7 +586,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(listStub.calls[0]?.apiKey).toBe("lk");
@@ -568,7 +612,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(0);
@@ -589,7 +634,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     const ghIdx = log.events.indexOf("getGhIdentity");
@@ -616,7 +662,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     const ghIdx = log.events.indexOf("getGhIdentity");
@@ -645,7 +692,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs: makeListPRDs(listStub, log),
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(1);
@@ -670,7 +718,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
       listPRDs,
       listStandaloneIssues: () => Promise.resolve([]),
       assertInReviewStatePresent: () => Promise.resolve(),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(1);
@@ -705,7 +754,8 @@ describe("tide run — early gates and Linear PRD selector", () => {
             'Linear team "ENG" has no `started`-type workflow state named "In Review". Run `tide setup` to provision it.'
           )
         ),
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(code).toBe(1);
@@ -739,14 +789,15 @@ describe("tide run — early gates and Linear PRD selector", () => {
         calls.push({ apiKey: ctx.apiKey, teamKey: ctx.teamKey });
         return Promise.resolve();
       },
-      baseBranchShellRunner: okBaseBranchRunner,
+      currentBranchShellRunner: okCurrentBranchRunner,
+      originHeadShellRunner: okOriginHeadRunner,
     });
 
     expect(calls).toEqual([{ apiKey: "lk", teamKey: "ENG" }]);
   });
 });
 
-describe("tideRun base-branch capture", () => {
+describe("tideRun current-branch capture", () => {
   let workDir: string;
   let repoRoot: string;
 
@@ -769,7 +820,7 @@ describe("tideRun base-branch capture", () => {
       stderr: sinks.pushStderr,
       // Simulate `git rev-parse --abbrev-ref HEAD` returning "HEAD" — the
       // sentinel git uses for detached-HEAD state.
-      baseBranchShellRunner: constShellRunner({
+      currentBranchShellRunner: constShellRunner({
         exitCode: 0,
         stdout: "HEAD\n",
         stderr: "",
@@ -786,7 +837,7 @@ describe("tideRun base-branch capture", () => {
       repoRoot,
       stdout: sinks.pushStdout,
       stderr: sinks.pushStderr,
-      baseBranchShellRunner: constShellRunner({
+      currentBranchShellRunner: constShellRunner({
         exitCode: 128,
         stdout: "",
         stderr: "fatal: not a git repository",
@@ -795,6 +846,46 @@ describe("tideRun base-branch capture", () => {
 
     expect(code).toBe(1);
     expect(sinks.stderr.join("")).toContain("git rev-parse");
+  });
+
+  test("origin/HEAD-unset (non-zero exit) is non-fatal: tideRun proceeds", async () => {
+    // Per ADR-0016: origin/HEAD-unset is a legal repo state (older clones,
+    // certain CI setups, `git remote add origin` without a subsequent
+    // `git remote set-head`). The capture must not fail the run — the
+    // PR-target prompt fires unconditionally with no default later.
+    const sinks = makeSinks();
+    writeFileSync(
+      join(repoRoot, ".tide", "config.ts"),
+      `export default { linear: { team: "ENG" } };\n`
+    );
+    writeFileSync(
+      join(repoRoot, ".tide", ".env"),
+      "LINEAR_API_KEY=lk\nANTHROPIC_API_KEY=ak\n"
+    );
+    writeFileSync(join(repoRoot, ".tide", "Dockerfile"), "FROM scratch\n");
+
+    const code = await tideRun({
+      repoRoot,
+      stdout: sinks.pushStdout,
+      stderr: sinks.pushStderr,
+      build: () => Promise.resolve(0),
+      getGhIdentity: () => Promise.resolve({ owner: "m1yon", repo: "tide" }),
+      getGhToken: () => Promise.resolve("ghp_test"),
+      listPRDs: () => Promise.resolve([]),
+      listStandaloneIssues: () => Promise.resolve([]),
+      assertInReviewStatePresent: () => Promise.resolve(),
+      currentBranchShellRunner: okCurrentBranchRunner,
+      // origin/HEAD unset → resolveOriginHead returns undefined; no throw.
+      originHeadShellRunner: constShellRunner({
+        exitCode: 128,
+        stdout: "",
+        stderr: "fatal: ambiguous argument 'origin/HEAD'",
+      }),
+    });
+
+    // Empty PRD/Standalone lists exit cleanly (the test's gate is that the
+    // origin/HEAD failure didn't abort the run).
+    expect(code).toBe(0);
   });
 });
 
@@ -1205,10 +1296,13 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      // baseBranch matches the PRD's branchName — under today's rules this
-      // would have errored out before the picker. The Branch override turns
-      // this into a silent-no-prompt success path.
-      baseBranch: "user/feature/eng-7-search",
+      // currentBranch matches the PRD's branchName — under today's rules
+      // this would have errored out before the picker. The Branch override
+      // turns this into a silent-no-prompt success path. originHead is set
+      // to the same value so the PR-target prompt is also silent (this
+      // test's contract: no prompt fires).
+      currentBranch: "user/feature/eng-7-search",
+      originHead: "user/feature/eng-7-search",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1259,7 +1353,8 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "user/feature/eng-7",
+      currentBranch: "user/feature/eng-7",
+      originHead: "user/feature/eng-7",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1303,7 +1398,8 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "main",
+      currentBranch: "main",
+      originHead: "main",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1356,7 +1452,15 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     });
   });
 
-  test("prompt path picks current: chosen branch threads through (override taken)", async () => {
+  test("prompt path picks current: chosen feature branch threads through; createWorktree's baseBranch is the resolved PR target (originHead), not the user's current branch", async () => {
+    // Per ADR-0016: featureBranch and baseBranch are now independent
+    // captures. The user's hand-named WIP branch (currentBranch) becomes
+    // the Feature worktree's branch via the override; the PR target
+    // resolves to `origin/HEAD` (here "master") via the smart-silent /
+    // user-confirmed PR-target step. createWorktree's baseBranch is the
+    // PR target, not the user's HEAD — the conflated single-capture model
+    // (which produced `featureBranch === baseBranch`) is the bug ADR-0016
+    // fixes.
     const picked = makePRD({
       identifier: "ENG-7",
       branchName: "user/feature/eng-7",
@@ -1368,7 +1472,8 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "user/wip-experiment",
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1391,6 +1496,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
       },
       promptBranchOverride: (input) =>
         Promise.resolve({ kind: "chosen", branch: input.currentBranch }),
+      promptPrTarget: makePromptPrTargetStub(),
       runIssueQueue: (opts) => {
         capturedFeatureBranch = opts.branch;
         return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
@@ -1411,7 +1517,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     expect(createCalls[0]?.branchStrategy).toEqual({
       type: "branch",
       branch: "user/wip-experiment",
-      baseBranch: "user/wip-experiment",
+      baseBranch: "master",
     });
   });
 
@@ -1429,7 +1535,8 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "main",
+      currentBranch: "main",
+      originHead: "main",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1483,7 +1590,8 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1524,7 +1632,8 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1550,6 +1659,281 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
 
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.repoName).toBe("widget");
+  });
+});
+
+describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  test("silent path: currentBranch === originHead — PR-target prompt does not fire", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let prTargetPromptCalls = 0;
+    let capturedBaseBranch: string | undefined;
+    const createCalls: CreateWorktreeOptions[] = [];
+
+    await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "master",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: (opts) => {
+        createCalls.push(opts);
+        return Promise.resolve({
+          branch: "user/feature/eng-7",
+          worktreePath: "/repo/.tide/worktrees/feature-eng-7",
+          run: () => Promise.reject(new Error("not used")),
+          interactive: () => Promise.reject(new Error("not used")),
+          createSandbox: () => Promise.reject(new Error("not used")),
+          close: () => Promise.resolve({}),
+          [Symbol.asyncDispose]: () => Promise.resolve(),
+        });
+      },
+      promptBranchOverride: makePromptOverrideStub(),
+      promptPrTarget: () => {
+        prTargetPromptCalls += 1;
+        return Promise.resolve({ kind: "chosen", branch: "x" });
+      },
+      runIssueQueue: (opts) => {
+        capturedBaseBranch = opts.baseBranch;
+        return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(prTargetPromptCalls).toBe(0);
+    // Silent path resolves baseBranch to origin/HEAD.
+    expect(capturedBaseBranch).toBe("master");
+    expect(createCalls[0]?.branchStrategy).toEqual({
+      type: "branch",
+      branch: "user/feature/eng-7",
+      baseBranch: "master",
+    });
+  });
+
+  test("prompt path: currentBranch !== originHead — PR-target prompt fires with originHead as default", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let promptedWith: PromptPrTargetInput | undefined;
+    let capturedBaseBranch: string | undefined;
+
+    await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
+      promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: (input) => {
+        promptedWith = input;
+        return Promise.resolve({
+          kind: "chosen",
+          branch: input.defaultBranch ?? "fallback",
+        });
+      },
+      runIssueQueue: (opts) => {
+        capturedBaseBranch = opts.baseBranch;
+        return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(promptedWith).toEqual({
+      defaultBranch: "master",
+      repoRoot: "/repo",
+    });
+    expect(capturedBaseBranch).toBe("master");
+  });
+
+  test("prompt path: origin/HEAD unset — prompt fires with no default; user-typed value threads through", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let promptedWith: PromptPrTargetInput | undefined;
+    let capturedBaseBranch: string | undefined;
+
+    await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/wip-experiment",
+      originHead: undefined,
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
+      promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: (input) => {
+        promptedWith = input;
+        return Promise.resolve({ kind: "chosen", branch: "dev" });
+      },
+      runIssueQueue: (opts) => {
+        capturedBaseBranch = opts.baseBranch;
+        return Promise.resolve({ completed: 1, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(promptedWith).toEqual({
+      defaultBranch: undefined,
+      repoRoot: "/repo",
+    });
+    expect(capturedBaseBranch).toBe("dev");
+  });
+
+  test("PR-target prompt cancellation: clean exit before any Linear write or sandbox launch", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let createCalls = 0;
+    let runIssueQueueCalls = 0;
+    let transitionCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: () => {
+        createCalls += 1;
+        return Promise.reject(new Error("should not be reached"));
+      },
+      promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: makePromptPrTargetStub({ cancel: true }),
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => {
+        transitionCalls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(createCalls).toBe(0);
+    expect(runIssueQueueCalls).toBe(0);
+    expect(transitionCalls).toBe(0);
+  });
+
+  test("PR-target threads through to runPrTailStep's baseBranch", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let capturedTailBaseBranch: string | undefined;
+
+    await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      createWorktree: makeCreateWorktreeStub(),
+      promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: makePromptPrTargetStub(),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
+      runPrTailStep: (opts) => {
+        capturedTailBaseBranch = opts.baseBranch;
+        return Promise.resolve({
+          outcome: { kind: "opened", url: "https://example/pr/1" },
+          outroMessage: "ok",
+          exitCode: 0,
+        } satisfies PrTailStepResult);
+      },
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => Promise.resolve(),
+      transitionRootToInReview: () => Promise.resolve(),
+    });
+
+    expect(capturedTailBaseBranch).toBe("master");
   });
 });
 
@@ -1587,7 +1971,8 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1646,7 +2031,8 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1684,7 +2070,8 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1727,7 +2114,8 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "main",
+      currentBranch: "main",
+      originHead: "main",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1793,7 +2181,8 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "main",
+      currentBranch: "main",
+      originHead: "main",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1858,7 +2247,8 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "main",
+      currentBranch: "main",
+      originHead: "main",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1950,7 +2340,8 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -1995,7 +2386,8 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2053,7 +2445,8 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
     return {
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2206,7 +2599,8 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "user/wip-experiment",
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2214,6 +2608,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: makePromptPrTargetStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
@@ -2246,7 +2641,8 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "main",
+      currentBranch: "main",
+      originHead: "main",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2278,7 +2674,8 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "user/feature/eng-7",
+      currentBranch: "user/feature/eng-7",
+      originHead: "user/feature/eng-7",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2301,10 +2698,15 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
     expect(out).not.toContain("will not auto-transition");
   });
 
-  test("override taken + no PR opened → suppresses the override warning; existing no-merge warning fires", async () => {
-    // The no-merge warning already covers the manual-transition messaging
-    // for the no-PR cases, so the override-specific warning is suppressed
-    // to avoid duplicate noise.
+  test("override taken + no PR opened → BOTH warnings fire (no-merge + override-active)", async () => {
+    // Per ADR-0016: the override-active warning loses its
+    // `tail.outcome.kind === 'opened'` gate. The gate existed to suppress
+    // the warning on the silent-no-PR path that the conflated single-
+    // capture model produced (currentBranch === baseBranch made the rev-
+    // list gate skip PR creation). With currentBranch and baseBranch now
+    // captured independently, that silent path is gone and the override
+    // warning fires whenever the override was taken — regardless of tail
+    // outcome.
     const picked = makePRD({
       identifier: "ENG-7",
       branchName: "user/feature/eng-7",
@@ -2313,7 +2715,8 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "user/wip-experiment",
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2321,6 +2724,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: makePromptPrTargetStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: optedOutTail,
@@ -2332,11 +2736,12 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
 
     expect(code).toBe(0);
     const out = stdoutChunks.join("");
-    // Existing no-merge warning still fires on the no-PR branch.
+    // No-merge warning still fires on the no-PR branch.
     expect(out).toContain("PRD ENG-7 will not auto-transition");
-    // The override-specific warning is NOT emitted on top of the no-PR
-    // case (avoid double messaging).
-    expect(out).not.toContain("Branch override");
+    // Override-active warning ALSO fires (was previously suppressed under
+    // the conflated model — see ADR-0016).
+    expect(out).toContain("Branch override");
+    expect(out).toContain("user/wip-experiment");
   });
 
   test("override taken on a Standalone Issue + PR opened → emits the warning with 'Issue' label", async () => {
@@ -2349,7 +2754,8 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "user/wip-experiment",
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2357,6 +2763,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: makePromptPrTargetStub(),
       runIssueQueue: () =>
         Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
       runPrTailStep: openedTail,
@@ -2409,7 +2816,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2451,7 +2859,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2489,7 +2898,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2548,7 +2958,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2601,7 +3012,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2641,7 +3053,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2673,7 +3086,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2718,7 +3132,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2752,7 +3167,8 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2793,7 +3209,8 @@ describe("runQueueAfterPick — PR-tail subIssueRefs come from runner.processed 
     await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2893,7 +3310,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2926,7 +3344,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2959,7 +3378,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -2993,7 +3413,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -3025,7 +3446,8 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const code = await runQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -3106,7 +3528,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -3139,7 +3562,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -3172,7 +3596,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -3207,7 +3632,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
@@ -3240,7 +3666,8 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const code = await runQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
-      baseBranch: "master",
+      currentBranch: "master",
+      originHead: "master",
       linearCtx: { apiKey: "lk", teamKey: "ENG" },
       repoRoot: "/repo",
       config: baseConfig,
