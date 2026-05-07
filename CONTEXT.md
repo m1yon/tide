@@ -85,6 +85,10 @@ _Avoid_: "re-poll" (a sub-step — only the network call), "re-queue" (overloads
 **Processed Sub-issue**:
 A **Sub-issue** the runner ran an iteration on during this `tide run` — including absorbed ones picked up by a **queue rebuild**, in the order tide ran them. Distinguished from the pre-flight queue (which is the snapshot at run start). The PR body's "Sub-issues addressed" block enumerates **processed Sub-issues**, not the pre-flight queue.
 
+**Sandcastle bridge**:
+The runtime symlink `<repoRoot>/.sandcastle` → **config directory** (`.tide/`) that redirects sandcastle's hardcoded `.sandcastle/{worktrees,logs}/` writes into tide's convention. Considered "intact" only when present and pointing at `.tide/`; any other on-disk shape (missing, broken target, real directory, regular file) is a broken **sandcastle bridge** and silently breaks subsequent `tide run` invocations at the worktree-collision check. Repaired by `tide setup`, detected by `tide doctor`. Removable once sandcastle exposes a config-directory override (see CONTEXT.md Flagged ambiguities).
+_Avoid_: "sandcastle symlink" (implementation-leaky), "config-dir bridge" (collides with **config directory**).
+
 ## Flagged ambiguities
 
 - Old `PRD` label (capital, per ADR 0002) meant "tide-created mirror of a GitHub parent". New `prd` (lowercase) means "user-declared tide-runnable PRD". Different semantics — ADR 0002 will be superseded.
