@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -225,25 +228,6 @@ describe("tide setup", () => {
   test("missing LINEAR_API_KEY yields non-zero exit and skips both Linear stubs", async () => {
     writeFileSync(join(tideDir, ".env"), "ANTHROPIC_API_KEY=ak\n");
     writeValidConfig();
-    const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
-    const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
-
-    const code = await setup({
-      repoRoot,
-      setupLabels: buildSetupLabels([], labelCapture),
-      provisionInReviewState: buildProvisionState(
-        { name: IN_REVIEW_STATE_NAME, created: false },
-        stateCapture
-      ),
-    });
-
-    expect(code).toBe(1);
-    expect(labelCapture.callCount).toBe(0);
-    expect(stateCapture.callCount).toBe(0);
-  });
-
-  test("missing .tide/config.ts yields non-zero exit and skips both Linear stubs", async () => {
-    writeValidEnv();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
@@ -505,6 +489,120 @@ describe("tide setup", () => {
       expect(classifyBridge(repoRoot)).toEqual({ kind: "intact" });
       expect(labelCapture.callCount).toBe(0);
       expect(stateCapture.callCount).toBe(0);
+    });
+  });
+
+  describe(".tide/ scaffold step", () => {
+    const SCAFFOLD_FILES = [
+      "config.ts",
+      "Dockerfile",
+      "prompt.md",
+      "prompt-standalone.md",
+      ".env.example",
+      ".gitignore",
+    ];
+
+    test("fresh repo (no .tide/ files) gets all 6 scaffold files written; env load fails afterwards so Linear is skipped", async () => {
+      // No writeValidEnv / writeValidConfig — `.tide/` is empty per beforeEach.
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+      });
+
+      expect(code).toBe(1);
+      for (const f of SCAFFOLD_FILES) {
+        expect(existsSync(join(tideDir, f))).toBe(true);
+      }
+      // env load fails on missing `.env`, so Linear is skipped.
+      expect(labelCapture.callCount).toBe(0);
+      expect(stateCapture.callCount).toBe(0);
+    });
+
+    test("second tide setup against a fully-up-to-date repo writes nothing new", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const firstCode = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: false },
+          stateCapture
+        ),
+      });
+      expect(firstCode).toBe(0);
+
+      const mtimes = new Map<string, number>();
+      for (const f of SCAFFOLD_FILES) {
+        mtimes.set(f, statSync(join(tideDir, f)).mtimeMs);
+      }
+
+      // Pause so any rewrite would change mtime detectably.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const secondCode = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: false },
+          stateCapture
+        ),
+      });
+      expect(secondCode).toBe(0);
+      for (const f of SCAFFOLD_FILES) {
+        expect(statSync(join(tideDir, f)).mtimeMs).toBe(mtimes.get(f) ?? -1);
+      }
+    });
+
+    test("hand-edited .tide/config.ts is preserved (skip-if-exists)", async () => {
+      writeValidEnv();
+      const handEdited = `export default { linear: { team: "MYTEAM" } };\n// hand-edited\n`;
+      writeFileSync(join(tideDir, "config.ts"), handEdited);
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+      });
+
+      expect(code).toBe(0);
+      expect(readFileSync(join(tideDir, "config.ts"), "utf8")).toBe(handEdited);
+      // The hand-edited team key flows through to the Linear context.
+      expect(labelCapture.ctx?.teamKey).toBe("MYTEAM");
+    });
+
+    test("Linear failure does not skip scaffold writes (file-write step is independent)", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const setupLabelsFn: SetupLabelsFn = () =>
+        Promise.reject(new Error("linear down"));
+      const provisionFn: ProvisionInReviewStateFn = () =>
+        Promise.reject(new Error("linear down"));
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: setupLabelsFn,
+        provisionInReviewState: provisionFn,
+      });
+
+      expect(code).toBe(1);
+      for (const f of SCAFFOLD_FILES) {
+        expect(existsSync(join(tideDir, f))).toBe(true);
+      }
     });
   });
 });
