@@ -75,6 +75,16 @@ Keeps the existing six-section emoji template (🚩 Problem / 💡 Solution / �
 **Branch-name linkage**:
 The feature branch's name comes verbatim from the **PRD**'s (or **Standalone Issue**'s) Linear-auto-generated `branchName`. Linear's GitHub integration uses this match to connect the PR to the parent and auto-transition it to _Done_ when the PR merges, completing the four-step parent lifecycle: **Triage → In Progress → In Review → Done**. The first three transitions are host-driven by tide — selector pick → _In Progress_ at run start, then a clean queue plus a successfully opened PR → _In Review_ post-submission (see ADR-0009); the final _In Review_ → _Done_ comes from Linear's GitHub integration on merge. Tide writes no `Fixes MEC-PRD` magic word into the PR body — the branch name is the entire link. If the In Review hand-off is skipped (no PR opened, or queue had aborts/flips) or the PR is closed without merging, the parent stays where tide left it — _In Progress_ or _In Review_ — until the user transitions it manually; tide warns about this at end-of-run.
 
+**Iteration boundary**:
+The moment between **iteration** N and **iteration** N+1 in a single `tide run`. Locus of host-side housekeeping: iteration N's Linear writes (transition to _Done_ or label flip + comment) settle, the host-side branch push fires (ADR-0007), the **queue rebuild** runs, and the next candidate **Sub-issue** is selected. Only meaningful under a **PRD** root — **Standalone Issue** roots are one-iteration loops with no boundary.
+
+**Queue rebuild**:
+The act of re-fetching the picked **PRD**'s direct children from Linear at every **iteration boundary**, excluding identifiers tide has already handled this run (transitioned to _Done_ or flipped to `ready-for-human`), and feeding the rest through the existing pure `buildOrderedQueue` to produce a fresh topo order. Absorbs new **Sub-issues** the human added in Linear's UI mid-run, and naturally drops queued-but-not-yet-run ones whose `ready-for-agent` label was removed mid-run. See ADR-0010.
+_Avoid_: "re-poll" (a sub-step — only the network call), "re-queue" (overloads the verb).
+
+**Processed Sub-issue**:
+A **Sub-issue** the runner ran an iteration on during this `tide run` — including absorbed ones picked up by a **queue rebuild**, in the order tide ran them. Distinguished from the pre-flight queue (which is the snapshot at run start). The PR body's "Sub-issues addressed" block enumerates **processed Sub-issues**, not the pre-flight queue.
+
 ## Flagged ambiguities
 
 - Old `PRD` label (capital, per ADR 0002) meant "tide-created mirror of a GitHub parent". New `prd` (lowercase) means "user-declared tide-runnable PRD". Different semantics — ADR 0002 will be superseded.
