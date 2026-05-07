@@ -764,7 +764,7 @@ describe("tide setup", () => {
       expect(code).toBe(0);
 
       const cases: { name: string; crossRef: string | null }[] = [
-        { name: "tide-to-prd", crossRef: "/tide-to-issues" },
+        { name: "tide-to-prd", crossRef: "tide-to-issues" },
         { name: "tide-to-issues", crossRef: null },
         { name: "tide-triage", crossRef: null },
       ];
