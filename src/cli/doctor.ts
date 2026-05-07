@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { intro, log, outro } from "@clack/prompts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
@@ -7,6 +8,11 @@ import {
   assertInReviewStatePresent as defaultAssertInReviewStatePresent,
   type LinearContext,
 } from "../linear/index.ts";
+import {
+  classifyBridge as defaultClassifyBridge,
+  describeBridgeForUser,
+  type BridgeState,
+} from "../sandcastle-bridge/index.ts";
 
 declare const VERSION: string | undefined;
 const version: string = typeof VERSION === "string" ? VERSION : "dev";
@@ -68,17 +74,24 @@ const defaultLinearViewerCheck: LinearViewerCheck = async (apiKey) => {
  */
 export type LinearInReviewStateCheck = (ctx: LinearContext) => Promise<void>;
 
+/**
+ * Inspects the on-disk shape of the sandcastle bridge. Pulled out as a test
+ * seam so doctor tests can assert ordering against the runner's call log
+ * without setting up filesystem fixtures for every state.
+ */
+export type ClassifyBridgeFn = (repoRoot: string) => BridgeState;
+
 export interface DoctorOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
   repoRoot?: string;
-  stdout?: (chunk: string) => void;
-  stderr?: (chunk: string) => void;
   /** Process runner (used by tests to stub gh + docker). */
   runner?: Runner;
   /** Linear API key check (used by tests to stub the Linear SDK). */
   linearViewerCheck?: LinearViewerCheck;
   /** Linear `In Review` state check (used by tests to stub the SDK). */
   linearInReviewStateCheck?: LinearInReviewStateCheck;
+  /** Sandcastle bridge classification (used by tests to stub on-disk shape). */
+  classifyBridge?: ClassifyBridgeFn;
 }
 
 interface CheckResult {
@@ -91,29 +104,28 @@ interface Step {
   run: () => Promise<CheckResult> | CheckResult;
 }
 
-const STATUS_OK = "ok";
-const STATUS_FAIL = "FAIL";
-
 /**
  * Runs the full preflight matrix in fixed order, printing each step's status.
  * Exits zero when every step passes; non-zero otherwise. The first failure
  * is annotated with a remediation hint.
  */
 export async function doctor(options: DoctorOptions = {}): Promise<number> {
-  const stdout = options.stdout ?? ((s: string) => process.stdout.write(s));
-  const stderr = options.stderr ?? ((s: string) => process.stderr.write(s));
   const runner = options.runner ?? defaultRunner;
   const linearViewerCheck =
     options.linearViewerCheck ?? defaultLinearViewerCheck;
   const linearInReviewStateCheck =
     options.linearInReviewStateCheck ?? defaultAssertInReviewStatePresent;
+  const classifyBridgeFn = options.classifyBridge ?? defaultClassifyBridge;
+
+  intro("tide doctor");
 
   let repoRoot: string;
   try {
     repoRoot = options.repoRoot ?? discoverRepoRoot();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    stderr(`${msg}\n`);
+    log.error(msg);
+    outro("Aborted.");
     return 1;
   }
 
@@ -123,6 +135,23 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
   let teamKeyCache: string | null = null;
 
   const steps: Step[] = [
+    {
+      // Check #1 by design: zero preconditions (no env, no config, no Linear,
+      // no GitHub) and a broken bridge invalidates the path assumptions every
+      // later check makes about `.sandcastle/`. Detect-only — repair lives in
+      // `tide setup`. See ADR-0011.
+      name: "sandcastle bridge",
+      run: () => {
+        const state = classifyBridgeFn(repoRoot);
+        if (state.kind === "intact" || state.kind === "missing") {
+          return { ok: true };
+        }
+        return {
+          ok: false,
+          hint: `${describeBridgeForUser(state)} Run \`tide setup\` to repair.`,
+        };
+      },
+    },
     {
       name: "gh auth",
       run: async () => {
@@ -275,9 +304,11 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
     }
 
     if (result.ok) {
-      stdout(`  [${STATUS_OK}]   ${step.name}\n`);
+      log.success(step.name);
     } else {
-      stdout(`  [${STATUS_FAIL}] ${step.name}\n`);
+      log.error(
+        result.hint !== undefined ? `${step.name}: ${result.hint}` : step.name
+      );
       if (!failed && result.hint !== undefined) {
         firstFailureHint = result.hint;
       }
@@ -286,12 +317,14 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
   }
 
   if (failed) {
-    if (firstFailureHint !== null) {
-      stderr(`\ntide doctor: ${firstFailureHint}\n`);
-    }
+    outro(
+      firstFailureHint !== null
+        ? `tide doctor: ${firstFailureHint}`
+        : "tide doctor: one or more checks failed."
+    );
     return 1;
   }
 
-  stdout(`\ntide doctor: all checks passed.\n`);
+  outro("tide doctor: all checks passed.");
   return 0;
 }

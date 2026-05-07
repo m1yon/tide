@@ -1,3 +1,4 @@
+import { confirm, intro, isCancel, log, outro, spinner } from "@clack/prompts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
@@ -8,6 +9,12 @@ import {
   type ProvisionInReviewStateResult,
   type SetupLabelResult,
 } from "../linear/index.ts";
+import {
+  classifyBridge,
+  createBridgeIfMissing,
+  describeBridgeForUser,
+  repairBridge,
+} from "../sandcastle-bridge/index.ts";
 
 /**
  * Test seam — defaults to the real `linear.setupLabels`. Tests stub this to
@@ -23,15 +30,34 @@ export type ProvisionInReviewStateFn = (
   ctx: LinearContext
 ) => Promise<ProvisionInReviewStateResult>;
 
+/**
+ * Test seam for the destructive bridge-repair confirm prompt. Returns true
+ * when the user has consented to the repair, false otherwise (decline,
+ * cancel, non-TTY). Tests stub this to bypass the clack TTY gate. The bridge
+ * state has already been described to the user via `log.warn` by the time
+ * this fires.
+ */
+export type ConfirmBridgeRepairFn = () => Promise<boolean>;
+
 export interface SetupOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
   repoRoot?: string;
-  stdout?: (chunk: string) => void;
-  stderr?: (chunk: string) => void;
   /** Linear `setupLabels` injection (used by tests to stub the SDK). */
   setupLabels?: SetupLabelsFn;
   /** Linear `provisionInReviewState` injection (used by tests). */
   provisionInReviewState?: ProvisionInReviewStateFn;
+  /** Bridge-repair confirm prompt (used by tests to bypass clack). */
+  confirmBridgeRepair?: ConfirmBridgeRepairFn;
+}
+
+async function defaultConfirmBridgeRepair(): Promise<boolean> {
+  const answer = await confirm({
+    message:
+      "Repair the sandcastle bridge? This will delete the above and recreate the symlink.",
+    initialValue: false,
+  });
+  if (isCancel(answer)) return false;
+  return answer;
 }
 
 /**
@@ -48,19 +74,55 @@ export interface SetupOptions {
  * always tells the user what is and is not present on the team.
  */
 export async function setup(options: SetupOptions = {}): Promise<number> {
-  const stdout = options.stdout ?? ((s: string) => process.stdout.write(s));
-  const stderr = options.stderr ?? ((s: string) => process.stderr.write(s));
   const setupLabelsFn = options.setupLabels ?? defaultSetupLabels;
   const provisionInReviewStateFn =
     options.provisionInReviewState ?? defaultProvisionInReviewState;
+  const confirmBridgeRepairFn =
+    options.confirmBridgeRepair ?? defaultConfirmBridgeRepair;
+
+  intro("tide setup");
 
   let repoRoot: string;
   try {
     repoRoot = options.repoRoot ?? discoverRepoRoot();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    stderr(`${msg}\n`);
+    log.error(msg);
+    outro("Aborted.");
     return 1;
+  }
+
+  // Step 1: sandcastle bridge. Runs before env/config so a fresh-clone setup
+  // that fails on a missing LINEAR_API_KEY still leaves a healthy bridge. The
+  // intact and missing states are silent (auto-create on missing); the four
+  // broken states describe what's on disk and prompt before any destructive
+  // action. Decline / cancel exits non-zero with the bridge untouched.
+  const bridgeState = classifyBridge(repoRoot);
+  if (bridgeState.kind === "missing") {
+    try {
+      createBridgeIfMissing(repoRoot);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`Sandcastle bridge: ${msg}`);
+      outro("Aborted.");
+      return 1;
+    }
+  } else if (bridgeState.kind !== "intact") {
+    log.warn(describeBridgeForUser(bridgeState));
+    const confirmed = await confirmBridgeRepairFn();
+    if (!confirmed) {
+      outro("Sandcastle bridge repair declined. Aborted.");
+      return 1;
+    }
+    try {
+      repairBridge(repoRoot, bridgeState);
+      log.success("Sandcastle bridge repaired.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`Sandcastle bridge repair failed: ${msg}`);
+      outro("Aborted.");
+      return 1;
+    }
   }
 
   let envMap: Record<string, string>;
@@ -68,13 +130,15 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     envMap = loadEnv({ repoRoot });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    stderr(`${msg}\n`);
+    log.error(msg);
+    outro("Aborted.");
     return 1;
   }
 
   const apiKey = envMap.LINEAR_API_KEY;
   if (typeof apiKey !== "string" || apiKey === "") {
-    stderr(`tide: LINEAR_API_KEY is empty in .tide/.env\n`);
+    log.error("LINEAR_API_KEY is empty in .tide/.env");
+    outro("Aborted.");
     return 1;
   }
 
@@ -84,84 +148,91 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     teamKey = config.linear.team;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    stderr(`${msg}\n`);
+    log.error(msg);
+    outro("Aborted.");
     return 1;
   }
 
   const ctx: LinearContext = { apiKey, teamKey };
 
+  log.info(`Linear team "${teamKey}"`);
+
   // Run the two provisioning steps independently so a failure in one is
   // surfaced without skipping the other. The user gets a single unified
   // report and a non-zero exit if anything failed.
+  const labelSpin = spinner();
+  labelSpin.start("Provisioning Linear labels");
   let labelResults: SetupLabelResult[] | undefined;
   let labelError: string | undefined;
   try {
     labelResults = await setupLabelsFn(ctx);
+    labelSpin.stop("Linear labels checked");
   } catch (err) {
     labelError = err instanceof Error ? err.message : String(err);
+    labelSpin.stop("Linear label provisioning failed");
   }
 
+  const stateSpin = spinner();
+  stateSpin.start('Provisioning "In Review" workflow state');
   let stateResult: ProvisionInReviewStateResult | undefined;
   let stateError: string | undefined;
   try {
     stateResult = await provisionInReviewStateFn(ctx);
+    stateSpin.stop('"In Review" workflow state checked');
   } catch (err) {
     stateError = err instanceof Error ? err.message : String(err);
+    stateSpin.stop('"In Review" workflow state provisioning failed');
   }
-
-  stdout(`tide setup: Linear team "${teamKey}"\n`);
 
   interface SummaryRow {
     kind: "label" | "state";
     name: string;
-    created: boolean;
   }
   const created: SummaryRow[] = [];
   const existing: SummaryRow[] = [];
   if (labelResults !== undefined) {
     for (const r of labelResults) {
-      (r.created ? created : existing).push({
-        kind: "label",
-        name: r.name,
-        created: r.created,
-      });
+      (r.created ? created : existing).push({ kind: "label", name: r.name });
     }
   }
   if (stateResult !== undefined) {
     (stateResult.created ? created : existing).push({
       kind: "state",
       name: stateResult.name,
-      created: stateResult.created,
     });
   }
 
   if (created.length > 0) {
-    stdout(`  created:\n`);
-    for (const r of created) {
-      stdout(`    - ${r.name} (${r.kind})\n`);
-    }
+    log.success(
+      ["Created:", ...created.map((r) => `  - ${r.name} (${r.kind})`)].join(
+        "\n"
+      )
+    );
   }
   if (existing.length > 0) {
-    stdout(`  already present:\n`);
-    for (const r of existing) {
-      stdout(`    - ${r.name} (${r.kind})\n`);
-    }
+    log.message(
+      [
+        "Already present:",
+        ...existing.map((r) => `  - ${r.name} (${r.kind})`),
+      ].join("\n")
+    );
   }
 
   if (labelError !== undefined) {
-    stderr(`tide setup: label provisioning failed: ${labelError}\n`);
+    log.error(`label provisioning failed: ${labelError}`);
   }
   if (stateError !== undefined) {
-    stderr(`tide setup: workflow-state provisioning failed: ${stateError}\n`);
+    log.error(`workflow-state provisioning failed: ${stateError}`);
   }
   if (labelError !== undefined || stateError !== undefined) {
+    outro("Setup completed with errors.");
     return 1;
   }
 
   if (created.length === 0) {
-    stdout(`tide setup: nothing to do — all resources already present.\n`);
+    outro("Nothing to do — all resources already present.");
   } else {
-    stdout(`tide setup: created ${String(created.length)} resource(s).\n`);
+    outro(`Created ${String(created.length)} resource(s).`);
   }
   return 0;
 }
