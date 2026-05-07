@@ -1,9 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   setup,
+  type ConfirmBridgeRepairFn,
   type ProvisionInReviewStateFn,
   type SetupLabelsFn,
 } from "./setup.ts";
@@ -14,6 +23,7 @@ import {
   type ProvisionInReviewStateResult,
   type SetupLabelResult,
 } from "../linear/index.ts";
+import { classifyBridge } from "../sandcastle-bridge/index.ts";
 
 interface SetupLabelsCapture {
   ctx: LinearContext | null;
@@ -334,5 +344,167 @@ describe("tide setup", () => {
     expect(code).toBe(1);
     expect(labelCapture.callCount).toBe(0);
     expect(stateCapture.callCount).toBe(0);
+  });
+
+  describe("sandcastle bridge step", () => {
+    test("missing bridge: silently auto-creates the symlink (no prompt)", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+      let confirmCalls = 0;
+      const confirmFn: ConfirmBridgeRepairFn = () => {
+        confirmCalls += 1;
+        return Promise.resolve(false);
+      };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+        confirmBridgeRepair: confirmFn,
+      });
+
+      expect(code).toBe(0);
+      expect(confirmCalls).toBe(0);
+      expect(classifyBridge(repoRoot)).toEqual({ kind: "intact" });
+    });
+
+    test("intact bridge: silent no-op (no prompt, no churn)", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      symlinkSync(".tide", join(repoRoot, ".sandcastle"), "dir");
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+      let confirmCalls = 0;
+      const confirmFn: ConfirmBridgeRepairFn = () => {
+        confirmCalls += 1;
+        return Promise.resolve(false);
+      };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+        confirmBridgeRepair: confirmFn,
+      });
+
+      expect(code).toBe(0);
+      expect(confirmCalls).toBe(0);
+      expect(classifyBridge(repoRoot)).toEqual({ kind: "intact" });
+    });
+
+    test("broken bridge + confirm true: repairs the bridge and exits zero", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      mkdirSync(join(repoRoot, ".sandcastle"));
+      mkdirSync(join(repoRoot, ".sandcastle", "worktrees"));
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+        confirmBridgeRepair: () => Promise.resolve(true),
+      });
+
+      expect(code).toBe(0);
+      expect(classifyBridge(repoRoot)).toEqual({ kind: "intact" });
+      const stat = lstatSync(join(repoRoot, ".sandcastle"));
+      expect(stat.isSymbolicLink()).toBe(true);
+      expect(readlinkSync(join(repoRoot, ".sandcastle"))).toBe(".tide");
+      expect(labelCapture.callCount).toBe(1);
+      expect(stateCapture.callCount).toBe(1);
+    });
+
+    test("broken bridge + confirm false: exits non-zero, bridge untouched, Linear half not invoked", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      writeFileSync(join(repoRoot, ".sandcastle"), "junk\n");
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+        confirmBridgeRepair: () => Promise.resolve(false),
+      });
+
+      expect(code).toBe(1);
+      expect(classifyBridge(repoRoot)).toEqual({ kind: "regular-file" });
+      expect(labelCapture.callCount).toBe(0);
+      expect(stateCapture.callCount).toBe(0);
+    });
+
+    test("bridge step runs before env/config: missing LINEAR_API_KEY does not skip the bridge", async () => {
+      // .env present but LINEAR_API_KEY missing. The bridge should still be
+      // repaired so a fresh-clone partial setup leaves a healthy bridge even
+      // when the Linear half can't run.
+      writeFileSync(join(tideDir, ".env"), "ANTHROPIC_API_KEY=ak\n");
+      writeValidConfig();
+      mkdirSync(join(repoRoot, ".sandcastle"));
+      mkdirSync(join(repoRoot, ".sandcastle", "worktrees"));
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+        confirmBridgeRepair: () => Promise.resolve(true),
+      });
+
+      expect(code).toBe(1);
+      expect(classifyBridge(repoRoot)).toEqual({ kind: "intact" });
+      expect(labelCapture.callCount).toBe(0);
+      expect(stateCapture.callCount).toBe(0);
+    });
+
+    test("bridge step runs before env/config: missing .tide/.env does not skip the bridge", async () => {
+      // Neither .env nor a broken bridge — but a broken bridge with no env at
+      // all means the bridge step must still classify + prompt + repair before
+      // env loading errors out.
+      writeValidConfig();
+      mkdirSync(join(repoRoot, ".sandcastle"));
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+      let confirmCalls = 0;
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+        confirmBridgeRepair: () => {
+          confirmCalls += 1;
+          return Promise.resolve(true);
+        },
+      });
+
+      expect(code).toBe(1);
+      expect(confirmCalls).toBe(1);
+      expect(classifyBridge(repoRoot)).toEqual({ kind: "intact" });
+      expect(labelCapture.callCount).toBe(0);
+      expect(stateCapture.callCount).toBe(0);
+    });
   });
 });

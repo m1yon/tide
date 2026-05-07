@@ -20,8 +20,6 @@
 // the sole PR↔root link — Linear's GitHub integration auto-transitions
 // the root on merge (ADR-0006).
 
-import { existsSync, lstatSync, mkdirSync, symlinkSync } from "node:fs";
-import path from "node:path";
 import {
   intro,
   outro,
@@ -31,6 +29,7 @@ import {
   isCancel,
   cancel,
 } from "@clack/prompts";
+import { createBridgeIfMissing } from "../sandcastle-bridge/index.ts";
 import { build as defaultBuild, type BuildOptions } from "./build.ts";
 import { loadConfig, type TideConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
@@ -603,35 +602,6 @@ export async function runQueueAfterPick(
   return tail.exitCode;
 }
 
-/**
- * Ensure that Sandcastle's hardcoded `.sandcastle/` directory points at the
- * tide-conventional `.tide/`. Sandcastle writes worktrees and logs under
- * `<repoRoot>/.sandcastle/{worktrees,logs}/`; we want them under `.tide/`
- * per the PRD. A symlink is the cleanest available mechanism — Sandcastle
- * already calls `realPath` to handle the symlinked case.
- */
-function ensureSandcastleSymlink(repoRoot: string): void {
-  const tideDir = path.join(repoRoot, ".tide");
-  if (!existsSync(tideDir)) {
-    // The .tide directory should always exist by the time `tide run` is
-    // invoked (loadConfig would have errored otherwise), but be defensive.
-    mkdirSync(tideDir, { recursive: true });
-  }
-
-  const sandcastleDir = path.join(repoRoot, ".sandcastle");
-  if (existsSync(sandcastleDir)) {
-    // If it exists, it's either our own symlink (good) or something the user
-    // put there. If it's a symlink we trust it; if it's a real directory we
-    // leave it alone (don't clobber user state).
-    const stat = lstatSync(sandcastleDir);
-    if (stat.isSymbolicLink()) return;
-    return;
-  }
-
-  // Relative symlink so the repo can be moved without breaking the link.
-  symlinkSync(".tide", sandcastleDir, "dir");
-}
-
 export async function tideRun(options: RunOptions = {}): Promise<number> {
   const stdout = options.stdout ?? ((s: string) => process.stdout.write(s));
   const stderr = options.stderr ?? ((s: string) => process.stderr.write(s));
@@ -745,8 +715,16 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
 
   // Sandcastle writes worktrees/logs under `.sandcastle/`. Tide's convention
   // is `.tide/`. Bridge with a symlink so the SDK paths land in the right
-  // place. (See PRD: "Sandcastle worktrees and logs land at .tide/...".)
-  ensureSandcastleSymlink(repoRoot);
+  // place. Residual safety net — only creates on `missing`, throws fast on a
+  // broken bridge with a hint to run `tide setup`. The full classify + repair
+  // lifecycle lives in `tide setup`.
+  try {
+    createBridgeIfMissing(repoRoot);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr(`${msg}\n`);
+    return 1;
+  }
 
   // Ensure the sandbox image is up to date before any clack UI is started —
   // streamed docker output otherwise interferes with clack rendering.

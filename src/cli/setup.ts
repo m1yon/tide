@@ -1,4 +1,4 @@
-import { intro, log, outro, spinner } from "@clack/prompts";
+import { confirm, intro, isCancel, log, outro, spinner } from "@clack/prompts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
@@ -9,6 +9,12 @@ import {
   type ProvisionInReviewStateResult,
   type SetupLabelResult,
 } from "../linear/index.ts";
+import {
+  classifyBridge,
+  createBridgeIfMissing,
+  describeBridgeForUser,
+  repairBridge,
+} from "../sandcastle-bridge/index.ts";
 
 /**
  * Test seam — defaults to the real `linear.setupLabels`. Tests stub this to
@@ -24,6 +30,15 @@ export type ProvisionInReviewStateFn = (
   ctx: LinearContext
 ) => Promise<ProvisionInReviewStateResult>;
 
+/**
+ * Test seam for the destructive bridge-repair confirm prompt. Returns true
+ * when the user has consented to the repair, false otherwise (decline,
+ * cancel, non-TTY). Tests stub this to bypass the clack TTY gate. The bridge
+ * state has already been described to the user via `log.warn` by the time
+ * this fires.
+ */
+export type ConfirmBridgeRepairFn = () => Promise<boolean>;
+
 export interface SetupOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
   repoRoot?: string;
@@ -31,6 +46,18 @@ export interface SetupOptions {
   setupLabels?: SetupLabelsFn;
   /** Linear `provisionInReviewState` injection (used by tests). */
   provisionInReviewState?: ProvisionInReviewStateFn;
+  /** Bridge-repair confirm prompt (used by tests to bypass clack). */
+  confirmBridgeRepair?: ConfirmBridgeRepairFn;
+}
+
+async function defaultConfirmBridgeRepair(): Promise<boolean> {
+  const answer = await confirm({
+    message:
+      "Repair the sandcastle bridge? This will delete the above and recreate the symlink.",
+    initialValue: false,
+  });
+  if (isCancel(answer)) return false;
+  return answer;
 }
 
 /**
@@ -50,6 +77,8 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
   const setupLabelsFn = options.setupLabels ?? defaultSetupLabels;
   const provisionInReviewStateFn =
     options.provisionInReviewState ?? defaultProvisionInReviewState;
+  const confirmBridgeRepairFn =
+    options.confirmBridgeRepair ?? defaultConfirmBridgeRepair;
 
   intro("tide setup");
 
@@ -61,6 +90,39 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     log.error(msg);
     outro("Aborted.");
     return 1;
+  }
+
+  // Step 1: sandcastle bridge. Runs before env/config so a fresh-clone setup
+  // that fails on a missing LINEAR_API_KEY still leaves a healthy bridge. The
+  // intact and missing states are silent (auto-create on missing); the four
+  // broken states describe what's on disk and prompt before any destructive
+  // action. Decline / cancel exits non-zero with the bridge untouched.
+  const bridgeState = classifyBridge(repoRoot);
+  if (bridgeState.kind === "missing") {
+    try {
+      createBridgeIfMissing(repoRoot);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`Sandcastle bridge: ${msg}`);
+      outro("Aborted.");
+      return 1;
+    }
+  } else if (bridgeState.kind !== "intact") {
+    log.warn(describeBridgeForUser(bridgeState));
+    const confirmed = await confirmBridgeRepairFn();
+    if (!confirmed) {
+      outro("Sandcastle bridge repair declined. Aborted.");
+      return 1;
+    }
+    try {
+      repairBridge(repoRoot, bridgeState);
+      log.success("Sandcastle bridge repaired.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`Sandcastle bridge repair failed: ${msg}`);
+      outro("Aborted.");
+      return 1;
+    }
   }
 
   let envMap: Record<string, string>;
