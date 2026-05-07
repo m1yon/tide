@@ -1,8 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { doctor, type Runner } from "./doctor.ts";
+import { doctor, type ClassifyBridgeFn, type Runner } from "./doctor.ts";
+import {
+  classifyBridge,
+  type BridgeState,
+} from "../sandcastle-bridge/index.ts";
 
 interface RunnerStub {
   // Map "<cmd> <args.joined-by-space>" → result
@@ -11,11 +24,14 @@ interface RunnerStub {
     { exitCode: number; stdout: string; stderr?: string }
   >;
   calls: { cmd: string; args: readonly string[]; cwd: string | undefined }[];
+  /** Optional shared call log for ordering assertions. */
+  orderLog?: string[];
 }
 
 function buildRunner(stub: RunnerStub): Runner {
   return (cmd, args, cwd) => {
     stub.calls.push({ cmd, args: [...args], cwd });
+    stub.orderLog?.push([cmd, ...args].join(" "));
     const key = [cmd, ...args].join(" ");
     const result = stub.responses[key];
     if (result === undefined) {
@@ -336,5 +352,190 @@ describe("tide doctor", () => {
     }
 
     expect(code).toBe(1);
+  });
+
+  describe("sandcastle bridge check", () => {
+    type WriteFn = typeof process.stdout.write;
+    let stdoutChunks: string[];
+    let stderrChunks: string[];
+    let originalStdoutWrite: WriteFn;
+    let originalStderrWrite: WriteFn;
+
+    beforeEach(() => {
+      stdoutChunks = [];
+      stderrChunks = [];
+      originalStdoutWrite = process.stdout.write.bind(process.stdout);
+      originalStderrWrite = process.stderr.write.bind(process.stderr);
+      const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+        stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+        return true;
+      };
+      const captureStderr: WriteFn = (chunk: string | Uint8Array): boolean => {
+        stderrChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+        return true;
+      };
+      process.stdout.write = captureStdout;
+      process.stderr.write = captureStderr;
+    });
+
+    afterEach(() => {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    });
+
+    function allOutput(): string {
+      return stdoutChunks.join("") + stderrChunks.join("");
+    }
+
+    test("bridge check runs first — before any runner call", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const orderLog: string[] = [];
+      const stub: RunnerStub = { ...happyRunnerStub(), orderLog };
+      const classifyStub: ClassifyBridgeFn = (root) => {
+        orderLog.push(`classifyBridge:${root}`);
+        return classifyBridge(root);
+      };
+
+      const code = await doctor({
+        repoRoot,
+        runner: buildRunner(stub),
+        linearViewerCheck: () => Promise.resolve(),
+        linearInReviewStateCheck: () => Promise.resolve(),
+        classifyBridge: classifyStub,
+      });
+
+      expect(code).toBe(0);
+      expect(orderLog[0]).toBe(`classifyBridge:${repoRoot}`);
+      expect(orderLog.indexOf("gh auth status")).toBeGreaterThan(0);
+    });
+
+    test("intact bridge — passes the check", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      symlinkSync(".tide", join(repoRoot, ".sandcastle"), "dir");
+
+      const code = await doctor({
+        repoRoot,
+        runner: buildRunner(happyRunnerStub()),
+        linearViewerCheck: () => Promise.resolve(),
+        linearInReviewStateCheck: () => Promise.resolve(),
+      });
+
+      expect(code).toBe(0);
+    });
+
+    test("missing bridge — passes the check", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      // No `.sandcastle` entry created — classifyBridge returns `missing`.
+
+      const code = await doctor({
+        repoRoot,
+        runner: buildRunner(happyRunnerStub()),
+        linearViewerCheck: () => Promise.resolve(),
+        linearInReviewStateCheck: () => Promise.resolve(),
+      });
+
+      expect(code).toBe(0);
+    });
+
+    const brokenStates: {
+      name: string;
+      kind: BridgeState["kind"];
+      setup: () => void;
+    }[] = [
+      {
+        name: "wrong-symlink-target",
+        kind: "wrong-symlink-target",
+        setup: () => {
+          symlinkSync(
+            "some-other-target",
+            join(repoRoot, ".sandcastle"),
+            "dir"
+          );
+        },
+      },
+      {
+        name: "real-dir-empty",
+        kind: "real-dir-empty",
+        setup: () => {
+          mkdirSync(join(repoRoot, ".sandcastle"));
+          mkdirSync(join(repoRoot, ".sandcastle", "worktrees"));
+        },
+      },
+      {
+        name: "real-dir-with-content",
+        kind: "real-dir-with-content",
+        setup: () => {
+          mkdirSync(join(repoRoot, ".sandcastle"));
+          writeFileSync(join(repoRoot, ".sandcastle", "junk.log"), "x\n");
+        },
+      },
+      {
+        name: "regular-file",
+        kind: "regular-file",
+        setup: () => {
+          writeFileSync(join(repoRoot, ".sandcastle"), "junk\n");
+        },
+      },
+    ];
+
+    for (const broken of brokenStates) {
+      test(`broken bridge (${broken.name}) — FAILs and the hint mentions \`tide setup\``, async () => {
+        writeValidEnv();
+        writeValidConfig();
+        broken.setup();
+
+        const code = await doctor({
+          repoRoot,
+          runner: buildRunner(happyRunnerStub()),
+          linearViewerCheck: () => Promise.resolve(),
+          linearInReviewStateCheck: () => Promise.resolve(),
+        });
+
+        expect(code).toBe(1);
+        expect(allOutput()).toContain("tide setup");
+        // Read-only invariant: doctor must not modify the bridge state.
+        expect(classifyBridge(repoRoot).kind).toBe(broken.kind);
+      });
+    }
+
+    test("read-only — broken `real-dir-with-content` left untouched on disk", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      mkdirSync(join(repoRoot, ".sandcastle"));
+      writeFileSync(join(repoRoot, ".sandcastle", "log.txt"), "preserve me\n");
+      const before = readdirSync(join(repoRoot, ".sandcastle"));
+
+      await doctor({
+        repoRoot,
+        runner: buildRunner(happyRunnerStub()),
+        linearViewerCheck: () => Promise.resolve(),
+        linearInReviewStateCheck: () => Promise.resolve(),
+      });
+
+      const stat = lstatSync(join(repoRoot, ".sandcastle"));
+      expect(stat.isSymbolicLink()).toBe(false);
+      expect(stat.isDirectory()).toBe(true);
+      expect(readdirSync(join(repoRoot, ".sandcastle"))).toEqual(before);
+    });
+
+    test("read-only — broken `wrong-symlink-target` symlink left untouched", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      symlinkSync("some-other-target", join(repoRoot, ".sandcastle"), "dir");
+
+      await doctor({
+        repoRoot,
+        runner: buildRunner(happyRunnerStub()),
+        linearViewerCheck: () => Promise.resolve(),
+        linearInReviewStateCheck: () => Promise.resolve(),
+      });
+
+      expect(readlinkSync(join(repoRoot, ".sandcastle"))).toBe(
+        "some-other-target"
+      );
+    });
   });
 });

@@ -8,6 +8,11 @@ import {
   assertInReviewStatePresent as defaultAssertInReviewStatePresent,
   type LinearContext,
 } from "../linear/index.ts";
+import {
+  classifyBridge as defaultClassifyBridge,
+  describeBridgeForUser,
+  type BridgeState,
+} from "../sandcastle-bridge/index.ts";
 
 declare const VERSION: string | undefined;
 const version: string = typeof VERSION === "string" ? VERSION : "dev";
@@ -69,6 +74,13 @@ const defaultLinearViewerCheck: LinearViewerCheck = async (apiKey) => {
  */
 export type LinearInReviewStateCheck = (ctx: LinearContext) => Promise<void>;
 
+/**
+ * Inspects the on-disk shape of the sandcastle bridge. Pulled out as a test
+ * seam so doctor tests can assert ordering against the runner's call log
+ * without setting up filesystem fixtures for every state.
+ */
+export type ClassifyBridgeFn = (repoRoot: string) => BridgeState;
+
 export interface DoctorOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
   repoRoot?: string;
@@ -78,6 +90,8 @@ export interface DoctorOptions {
   linearViewerCheck?: LinearViewerCheck;
   /** Linear `In Review` state check (used by tests to stub the SDK). */
   linearInReviewStateCheck?: LinearInReviewStateCheck;
+  /** Sandcastle bridge classification (used by tests to stub on-disk shape). */
+  classifyBridge?: ClassifyBridgeFn;
 }
 
 interface CheckResult {
@@ -101,6 +115,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
     options.linearViewerCheck ?? defaultLinearViewerCheck;
   const linearInReviewStateCheck =
     options.linearInReviewStateCheck ?? defaultAssertInReviewStatePresent;
+  const classifyBridgeFn = options.classifyBridge ?? defaultClassifyBridge;
 
   intro("tide doctor");
 
@@ -120,6 +135,23 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
   let teamKeyCache: string | null = null;
 
   const steps: Step[] = [
+    {
+      // Check #1 by design: zero preconditions (no env, no config, no Linear,
+      // no GitHub) and a broken bridge invalidates the path assumptions every
+      // later check makes about `.sandcastle/`. Detect-only — repair lives in
+      // `tide setup`. See ADR-0011.
+      name: "sandcastle bridge",
+      run: () => {
+        const state = classifyBridgeFn(repoRoot);
+        if (state.kind === "intact" || state.kind === "missing") {
+          return { ok: true };
+        }
+        return {
+          ok: false,
+          hint: `${describeBridgeForUser(state)} Run \`tide setup\` to repair.`,
+        };
+      },
+    },
     {
       name: "gh auth",
       run: async () => {
