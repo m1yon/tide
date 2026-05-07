@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { intro, log, outro } from "@clack/prompts";
 import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
@@ -71,8 +72,6 @@ export type LinearInReviewStateCheck = (ctx: LinearContext) => Promise<void>;
 export interface DoctorOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
   repoRoot?: string;
-  stdout?: (chunk: string) => void;
-  stderr?: (chunk: string) => void;
   /** Process runner (used by tests to stub gh + docker). */
   runner?: Runner;
   /** Linear API key check (used by tests to stub the Linear SDK). */
@@ -91,29 +90,27 @@ interface Step {
   run: () => Promise<CheckResult> | CheckResult;
 }
 
-const STATUS_OK = "ok";
-const STATUS_FAIL = "FAIL";
-
 /**
  * Runs the full preflight matrix in fixed order, printing each step's status.
  * Exits zero when every step passes; non-zero otherwise. The first failure
  * is annotated with a remediation hint.
  */
 export async function doctor(options: DoctorOptions = {}): Promise<number> {
-  const stdout = options.stdout ?? ((s: string) => process.stdout.write(s));
-  const stderr = options.stderr ?? ((s: string) => process.stderr.write(s));
   const runner = options.runner ?? defaultRunner;
   const linearViewerCheck =
     options.linearViewerCheck ?? defaultLinearViewerCheck;
   const linearInReviewStateCheck =
     options.linearInReviewStateCheck ?? defaultAssertInReviewStatePresent;
 
+  intro("tide doctor");
+
   let repoRoot: string;
   try {
     repoRoot = options.repoRoot ?? discoverRepoRoot();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    stderr(`${msg}\n`);
+    log.error(msg);
+    outro("Aborted.");
     return 1;
   }
 
@@ -275,9 +272,11 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
     }
 
     if (result.ok) {
-      stdout(`  [${STATUS_OK}]   ${step.name}\n`);
+      log.success(step.name);
     } else {
-      stdout(`  [${STATUS_FAIL}] ${step.name}\n`);
+      log.error(
+        result.hint !== undefined ? `${step.name}: ${result.hint}` : step.name
+      );
       if (!failed && result.hint !== undefined) {
         firstFailureHint = result.hint;
       }
@@ -286,12 +285,14 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
   }
 
   if (failed) {
-    if (firstFailureHint !== null) {
-      stderr(`\ntide doctor: ${firstFailureHint}\n`);
-    }
+    outro(
+      firstFailureHint !== null
+        ? `tide doctor: ${firstFailureHint}`
+        : "tide doctor: one or more checks failed."
+    );
     return 1;
   }
 
-  stdout(`\ntide doctor: all checks passed.\n`);
+  outro("tide doctor: all checks passed.");
   return 0;
 }

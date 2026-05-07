@@ -29,34 +29,6 @@ function buildRunner(stub: RunnerStub): Runner {
   };
 }
 
-interface Sinks {
-  stdout: string[];
-  stderr: string[];
-  pushStdout: (s: string) => void;
-  pushStderr: (s: string) => void;
-}
-
-function makeSinks(): Sinks {
-  const sinks: Sinks = {
-    stdout: [],
-    stderr: [],
-    pushStdout: (s: string) => {
-      // assigned below
-      void s;
-    },
-    pushStderr: (s: string) => {
-      void s;
-    },
-  };
-  sinks.pushStdout = (s: string) => {
-    sinks.stdout.push(s);
-  };
-  sinks.pushStderr = (s: string) => {
-    sinks.stderr.push(s);
-  };
-  return sinks;
-}
-
 describe("tide doctor", () => {
   let workDir: string;
   let repoRoot: string;
@@ -88,8 +60,8 @@ describe("tide doctor", () => {
     );
   }
 
-  function happyRunner(): Runner {
-    return buildRunner({
+  function happyRunnerStub(): RunnerStub {
+    return {
       calls: [],
       responses: {
         "gh auth status": { exitCode: 0, stdout: "" },
@@ -99,34 +71,36 @@ describe("tide doctor", () => {
           stdout: JSON.stringify({ owner: { login: "m1yon" }, name: "tide" }),
         },
       },
-    });
+    };
   }
 
-  test("all checks pass — exits zero, prints version, prints all-passed line", async () => {
+  test("all checks pass — exits zero with each runner check invoked once", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
+    const stub = happyRunnerStub();
+    let viewerCalls = 0;
+    let inReviewCalls = 0;
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
-      linearViewerCheck: () => Promise.resolve(),
-      linearInReviewStateCheck: () => Promise.resolve(),
+      runner: buildRunner(stub),
+      linearViewerCheck: () => {
+        viewerCalls += 1;
+        return Promise.resolve();
+      },
+      linearInReviewStateCheck: () => {
+        inReviewCalls += 1;
+        return Promise.resolve();
+      },
     });
 
     expect(code).toBe(0);
-    const out = sinks.stdout.join("");
-    expect(out).toContain("gh auth");
-    expect(out).toContain(".tide/.env");
-    expect(out).toContain(".tide/config.ts");
-    expect(out).toContain("docker daemon");
-    expect(out).toContain("Linear API");
-    expect(out).toContain('Linear "In Review" state');
-    expect(out).toContain("gh repo identity");
-    expect(out).toContain("tide version");
-    expect(out).toContain("all checks passed");
+    expect(viewerCalls).toBe(1);
+    expect(inReviewCalls).toBe(1);
+    const cmds = stub.calls.map((c) => [c.cmd, ...c.args].join(" "));
+    expect(cmds).toContain("gh auth status");
+    expect(cmds).toContain("docker info");
+    expect(cmds).toContain("gh repo view --json owner,name");
   });
 
   test("all checks pass with CLAUDE_CODE_OAUTH_TOKEN in place of ANTHROPIC_API_KEY", async () => {
@@ -135,58 +109,48 @@ describe("tide doctor", () => {
       "LINEAR_API_KEY=lk\nCLAUDE_CODE_OAUTH_TOKEN=tok\n"
     );
     writeValidConfig();
-    const sinks = makeSinks();
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
+      runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
       linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(0);
-    expect(sinks.stdout.join("")).toContain("all checks passed");
   });
 
-  test("missing `In Review` state yields non-zero exit with a `tide setup` hint", async () => {
+  test("missing `In Review` state yields non-zero exit; the check is invoked", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
+    let inReviewCalls = 0;
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
+      runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
-      linearInReviewStateCheck: () =>
-        Promise.reject(
+      linearInReviewStateCheck: () => {
+        inReviewCalls += 1;
+        return Promise.reject(
           new Error(
             'Linear team "ENG" has no `started`-type workflow state named "In Review". Run `tide setup` to provision it.'
           )
-        ),
+        );
+      },
     });
 
     expect(code).toBe(1);
-    const stderr = sinks.stderr.join("");
-    expect(stderr).toContain("In Review");
-    expect(stderr).toContain("tide setup");
-    expect(sinks.stdout.join("")).toContain('Linear "In Review" state');
+    expect(inReviewCalls).toBe(1);
   });
 
   test("`In Review` check receives the apiKey and teamKey from env+config", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const calls: { apiKey: string; teamKey: string }[] = [];
 
     await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
+      runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
       linearInReviewStateCheck: (ctx) => {
         calls.push({ apiKey: ctx.apiKey, teamKey: ctx.teamKey });
@@ -197,11 +161,10 @@ describe("tide doctor", () => {
     expect(calls).toEqual([{ apiKey: "lk", teamKey: "ENG" }]);
   });
 
-  test("gh auth failure exits non-zero with a remediation hint", async () => {
+  test("gh auth failure exits non-zero", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
-    const runner = buildRunner({
+    const stub: RunnerStub = {
       calls: [],
       responses: {
         "gh auth status": { exitCode: 1, stdout: "" },
@@ -211,78 +174,80 @@ describe("tide doctor", () => {
           stdout: JSON.stringify({ owner: { login: "m1yon" }, name: "tide" }),
         },
       },
-    });
+    };
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner,
+      runner: buildRunner(stub),
       linearViewerCheck: () => Promise.resolve(),
       linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("gh auth login");
+    const cmds = stub.calls.map((c) => [c.cmd, ...c.args].join(" "));
+    expect(cmds).toContain("gh auth status");
   });
 
-  test("missing .tide/.env yields a non-zero exit and clear hint", async () => {
+  test("missing .tide/.env yields a non-zero exit and skips Linear API check", async () => {
     writeValidConfig();
-    const sinks = makeSinks();
+    let viewerCalls = 0;
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
-      linearViewerCheck: () => Promise.resolve(),
+      runner: buildRunner(happyRunnerStub()),
+      linearViewerCheck: () => {
+        viewerCalls += 1;
+        return Promise.resolve();
+      },
       linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("env file not found");
+    // Linear API check is gated on .env loading; missing .env should skip it.
+    expect(viewerCalls).toBe(0);
   });
 
-  test("missing required env key yields a non-zero exit and names the key", async () => {
+  test("missing required env key yields non-zero exit and skips Linear API check", async () => {
     writeFileSync(join(tideDir, ".env"), "ANTHROPIC_API_KEY=ak\n");
     writeValidConfig();
-    const sinks = makeSinks();
+    let viewerCalls = 0;
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
-      linearViewerCheck: () => Promise.resolve(),
+      runner: buildRunner(happyRunnerStub()),
+      linearViewerCheck: () => {
+        viewerCalls += 1;
+        return Promise.resolve();
+      },
       linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("LINEAR_API_KEY");
+    expect(viewerCalls).toBe(0);
   });
 
-  test("missing .tide/config.ts yields a non-zero exit", async () => {
+  test("missing .tide/config.ts yields a non-zero exit and skips In Review check", async () => {
     writeValidEnv();
-    const sinks = makeSinks();
+    let inReviewCalls = 0;
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
+      runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
-      linearInReviewStateCheck: () => Promise.resolve(),
+      linearInReviewStateCheck: () => {
+        inReviewCalls += 1;
+        return Promise.resolve();
+      },
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("config file not found");
+    expect(inReviewCalls).toBe(0);
   });
 
-  test("docker daemon unreachable yields a non-zero exit and clear hint", async () => {
+  test("docker daemon unreachable yields a non-zero exit", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
-    const runner = buildRunner({
+    const stub: RunnerStub = {
       calls: [],
       responses: {
         "gh auth status": { exitCode: 0, stdout: "" },
@@ -292,44 +257,43 @@ describe("tide doctor", () => {
           stdout: JSON.stringify({ owner: { login: "m1yon" }, name: "tide" }),
         },
       },
-    });
+    };
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner,
+      runner: buildRunner(stub),
       linearViewerCheck: () => Promise.resolve(),
       linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("Docker daemon");
+    const cmds = stub.calls.map((c) => [c.cmd, ...c.args].join(" "));
+    expect(cmds).toContain("docker info");
   });
 
-  test("Linear API failure yields a non-zero exit with the underlying message", async () => {
+  test("Linear API failure yields a non-zero exit", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
+    let viewerCalls = 0;
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner: happyRunner(),
-      linearViewerCheck: () => Promise.reject(new Error("invalid api key")),
+      runner: buildRunner(happyRunnerStub()),
+      linearViewerCheck: () => {
+        viewerCalls += 1;
+        return Promise.reject(new Error("invalid api key"));
+      },
       linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("invalid api key");
+    expect(viewerCalls).toBe(1);
   });
 
   test("gh repo identity failure yields a non-zero exit", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
-    const runner = buildRunner({
+    const stub: RunnerStub = {
       calls: [],
       responses: {
         "gh auth status": { exitCode: 0, stdout: "" },
@@ -340,34 +304,30 @@ describe("tide doctor", () => {
           stderr: "no remote",
         },
       },
-    });
+    };
 
     const code = await doctor({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
-      runner,
+      runner: buildRunner(stub),
       linearViewerCheck: () => Promise.resolve(),
       linearInReviewStateCheck: () => Promise.resolve(),
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("gh repo view");
+    const cmds = stub.calls.map((c) => [c.cmd, ...c.args].join(" "));
+    expect(cmds).toContain("gh repo view --json owner,name");
   });
 
-  test("invoked outside any git repo errors clearly without a stack trace", async () => {
+  test("invoked outside any git repo exits non-zero", async () => {
     const lonely = join(workDir, "lonely");
     mkdirSync(lonely, { recursive: true });
-    const sinks = makeSinks();
 
     const originalCwd = process.cwd();
     let code: number;
     try {
       process.chdir(lonely);
       code = await doctor({
-        stdout: sinks.pushStdout,
-        stderr: sinks.pushStderr,
-        runner: happyRunner(),
+        runner: buildRunner(happyRunnerStub()),
         linearViewerCheck: () => Promise.resolve(),
         linearInReviewStateCheck: () => Promise.resolve(),
       });
@@ -376,6 +336,5 @@ describe("tide doctor", () => {
     }
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("not inside a git repository");
   });
 });

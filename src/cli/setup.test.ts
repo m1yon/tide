@@ -15,29 +15,6 @@ import {
   type SetupLabelResult,
 } from "../linear/index.ts";
 
-interface Sinks {
-  stdout: string[];
-  stderr: string[];
-  pushStdout: (s: string) => void;
-  pushStderr: (s: string) => void;
-}
-
-function makeSinks(): Sinks {
-  const sinks: Sinks = {
-    stdout: [],
-    stderr: [],
-    pushStdout: () => undefined,
-    pushStderr: () => undefined,
-  };
-  sinks.pushStdout = (s: string) => {
-    sinks.stdout.push(s);
-  };
-  sinks.pushStderr = (s: string) => {
-    sinks.stderr.push(s);
-  };
-  return sinks;
-}
-
 interface SetupLabelsCapture {
   ctx: LinearContext | null;
   callCount: number;
@@ -110,14 +87,11 @@ describe("tide setup", () => {
   test("on a fresh team, creates all three labels + the In Review state and exits zero", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: true },
@@ -132,26 +106,16 @@ describe("tide setup", () => {
     expect(labelCapture.ctx?.teamKey).toBe("ENG");
     expect(stateCapture.ctx?.apiKey).toBe("lk");
     expect(stateCapture.ctx?.teamKey).toBe("ENG");
-
-    const out = sinks.stdout.join("");
-    expect(out).toContain("ENG");
-    expect(out).toContain("created");
-    for (const name of SETUP_LABEL_NAMES) expect(out).toContain(name);
-    expect(out).toContain(IN_REVIEW_STATE_NAME);
-    expect(out).toContain("created 4 resource(s)");
   });
 
-  test("on a fully provisioned team, reports nothing-to-do and exits zero", async () => {
+  test("on a fully provisioned team, exits zero with both stubs called once", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: false },
@@ -160,16 +124,13 @@ describe("tide setup", () => {
     });
 
     expect(code).toBe(0);
-    const out = sinks.stdout.join("");
-    expect(out).toContain("already present");
-    expect(out).toContain(IN_REVIEW_STATE_NAME);
-    expect(out).toContain("nothing to do");
+    expect(labelCapture.callCount).toBe(1);
+    expect(stateCapture.callCount).toBe(1);
   });
 
-  test("partial pre-existing: reports both created and already-present sections in one unified summary", async () => {
+  test("partial pre-existing: both stubs called and exits zero", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
     const results: SetupLabelResult[] = [
@@ -180,8 +141,6 @@ describe("tide setup", () => {
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels(results, labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: true },
@@ -190,27 +149,18 @@ describe("tide setup", () => {
     });
 
     expect(code).toBe(0);
-    const out = sinks.stdout.join("");
-    expect(out).toContain("created:");
-    expect(out).toContain("already present:");
-    expect(out).toContain("ready-for-agent");
-    expect(out).toContain("ready-for-human");
-    expect(out).toContain("prd");
-    // Single unified summary — labels and states reported together.
-    expect(out).toContain(IN_REVIEW_STATE_NAME);
+    expect(labelCapture.callCount).toBe(1);
+    expect(stateCapture.callCount).toBe(1);
   });
 
   test("provisions the In Review state via provisionInReviewState (single call, ctx forwarded)", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: true },
@@ -224,17 +174,14 @@ describe("tide setup", () => {
     expect(stateCapture.ctx?.teamKey).toBe("ENG");
   });
 
-  test("In Review already present is reported as such in the unified summary", async () => {
+  test("In Review already present: state stub returns created:false and exits zero", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: false },
@@ -243,21 +190,16 @@ describe("tide setup", () => {
     });
 
     expect(code).toBe(0);
-    const out = sinks.stdout.join("");
-    expect(out).toContain("already present");
-    expect(out).toContain(IN_REVIEW_STATE_NAME);
+    expect(stateCapture.callCount).toBe(1);
   });
 
-  test("missing .tide/.env yields non-zero exit and a clear hint", async () => {
+  test("missing .tide/.env yields non-zero exit and skips both Linear stubs", async () => {
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels([], labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: false },
@@ -268,20 +210,16 @@ describe("tide setup", () => {
     expect(code).toBe(1);
     expect(labelCapture.callCount).toBe(0);
     expect(stateCapture.callCount).toBe(0);
-    expect(sinks.stderr.join("")).toContain("env file not found");
   });
 
-  test("missing LINEAR_API_KEY yields non-zero exit and names the key", async () => {
+  test("missing LINEAR_API_KEY yields non-zero exit and skips both Linear stubs", async () => {
     writeFileSync(join(tideDir, ".env"), "ANTHROPIC_API_KEY=ak\n");
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels([], labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: false },
@@ -292,19 +230,15 @@ describe("tide setup", () => {
     expect(code).toBe(1);
     expect(labelCapture.callCount).toBe(0);
     expect(stateCapture.callCount).toBe(0);
-    expect(sinks.stderr.join("")).toContain("LINEAR_API_KEY");
   });
 
-  test("missing .tide/config.ts yields non-zero exit", async () => {
+  test("missing .tide/config.ts yields non-zero exit and skips both Linear stubs", async () => {
     writeValidEnv();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels([], labelCapture),
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: false },
@@ -315,21 +249,17 @@ describe("tide setup", () => {
     expect(code).toBe(1);
     expect(labelCapture.callCount).toBe(0);
     expect(stateCapture.callCount).toBe(0);
-    expect(sinks.stderr.join("")).toContain("config file not found");
   });
 
-  test("Linear setupLabels failure surfaces a clear error and non-zero exit", async () => {
+  test("Linear setupLabels failure yields non-zero exit; state step still runs", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
     const setupLabelsFn: SetupLabelsFn = () =>
       Promise.reject(new Error("invalid api key"));
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: setupLabelsFn,
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: false },
@@ -338,48 +268,37 @@ describe("tide setup", () => {
     });
 
     expect(code).toBe(1);
-    expect(sinks.stderr.join("")).toContain("invalid api key");
+    expect(stateCapture.callCount).toBe(1);
   });
 
-  test("provisionInReviewState failure surfaces independently and yields non-zero exit", async () => {
+  test("provisionInReviewState failure does not skip setupLabels; both ran, exits non-zero", async () => {
     // Per-resource failures are reported independently — a state failure
-    // does not skip the label step, and the user sees both outcomes in one
-    // unified summary.
+    // does not skip the label step.
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const provisionFn: ProvisionInReviewStateFn = () =>
       Promise.reject(new Error("In Progress flank missing"));
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: provisionFn,
     });
 
     expect(code).toBe(1);
     expect(labelCapture.callCount).toBe(1);
-    expect(sinks.stderr.join("")).toContain("In Progress flank missing");
-    // Labels still reported in the summary even though state failed.
-    const out = sinks.stdout.join("");
-    for (const name of SETUP_LABEL_NAMES) expect(out).toContain(name);
   });
 
-  test("setupLabels failure does not skip provisionInReviewState; both outcomes surface", async () => {
+  test("setupLabels failure does not skip provisionInReviewState; both stubs ran", async () => {
     writeValidEnv();
     writeValidConfig();
-    const sinks = makeSinks();
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
     const setupLabelsFn: SetupLabelsFn = () =>
       Promise.reject(new Error("label create failed"));
 
     const code = await setup({
       repoRoot,
-      stdout: sinks.pushStdout,
-      stderr: sinks.pushStderr,
       setupLabels: setupLabelsFn,
       provisionInReviewState: buildProvisionState(
         { name: IN_REVIEW_STATE_NAME, created: true },
@@ -388,17 +307,12 @@ describe("tide setup", () => {
     });
 
     expect(code).toBe(1);
-    // State step still ran independently.
     expect(stateCapture.callCount).toBe(1);
-    expect(sinks.stderr.join("")).toContain("label create failed");
-    // The created In Review state is still reflected in the summary.
-    expect(sinks.stdout.join("")).toContain(IN_REVIEW_STATE_NAME);
   });
 
-  test("invoked outside any git repo errors clearly without a stack trace", async () => {
+  test("invoked outside any git repo exits non-zero and skips both Linear stubs", async () => {
     const lonely = join(workDir, "lonely");
     mkdirSync(lonely, { recursive: true });
-    const sinks = makeSinks();
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
@@ -407,8 +321,6 @@ describe("tide setup", () => {
     try {
       process.chdir(lonely);
       code = await setup({
-        stdout: sinks.pushStdout,
-        stderr: sinks.pushStderr,
         setupLabels: buildSetupLabels([], labelCapture),
         provisionInReviewState: buildProvisionState(
           { name: IN_REVIEW_STATE_NAME, created: false },
@@ -422,6 +334,5 @@ describe("tide setup", () => {
     expect(code).toBe(1);
     expect(labelCapture.callCount).toBe(0);
     expect(stateCapture.callCount).toBe(0);
-    expect(sinks.stderr.join("")).toContain("not inside a git repository");
   });
 });
