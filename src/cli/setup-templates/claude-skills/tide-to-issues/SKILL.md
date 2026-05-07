@@ -1,57 +1,95 @@
 ---
 name: tide-to-issues
-description: Break a tide PRD into queueable Linear sub-issues — each child carries `ready-for-agent`, the `[<repo>] ` title prefix, the PRD as parent, and `blockedBy` relations for ordering.
+description: Break a plan, spec, or PRD into independently-grabbable Linear sub-issues using tracer-bullet vertical slices, published via the Linear MCP server. Use when user wants to convert a PRD into Linear sub-issues in a tide-configured repo backed by Linear.
 ---
 
-# tide-to-issues
+# Tide To Issues
 
-Take an existing tide **PRD** (a Linear issue carrying the `prd` label) and produce its **Sub-issues** — the units of work `tide run` will queue. Each sub-issue is one iteration's worth of work, scoped tightly enough that an agent can finish it in a single `tide run` pass.
+Break a plan into independently-grabbable Linear sub-issues using vertical slices (tracer bullets).
 
-## Pre-flight (hard-stop)
+This skill assumes the repo is tide-configured and uses Linear as its issue tracker. Team identity is read from `<repoRoot>/.tide/config.ts` (`linear.team`). If `.tide/config.ts` does not exist at the repo root, hard-stop and tell the user: "This skill requires `.tide/config.ts` at the repo root with a `linear.team` key. Run `tide setup` (or add the file) before invoking `tide-to-issues`." Do not prompt for the team mid-flow.
 
-Read `<repoRoot>/.tide/config.ts`. If the file does not exist, stop immediately and emit this exact message, then halt:
+## Repo prefix on issue titles
 
-> This skill (`tide-to-issues`) requires a tide-configured repo. Run `tide setup` from the repo root, then re-invoke `/tide-to-issues`.
+Prefix every created or retitled issue with `[<repo>] ` (e.g. `[dotfiles] store repo in linear issues`). Compute `<repo>` from `git remote get-url origin` — last path segment, strip trailing `.git`. If `origin` is missing, hard-stop: "This skill requires an `origin` git remote. Run `git remote add origin <url>` first." Idempotent — never double-prefix. Applies to all new issues and sub-issues (regardless of parent) and title updates; titles only, not comment bodies.
 
-If `.tide/config.ts` is present, parse it for the `linear.team` key and use that as the team identifier for every Linear write below.
+All Linear operations go through the registered `linear-server` MCP server. Describe the operation you want to perform in prose ("create a Linear issue with title X, body Y, team `{linear.team}`, state Triage, labels [...], parentId `<prd-id>`") and pick the appropriate MCP tool at runtime; do not hardcode tool names.
 
-## Inputs
+Reference Linear issues by their team-prefixed identifier (e.g. `PER-42`), not by URL.
 
-Either:
+## Process
 
-- A Linear PRD identifier (e.g. `PER-42`) passed by the user. Fetch the PRD's title, description, and any existing comments before drafting sub-issues.
-- A reference to a freshly authored PRD from `/tide-to-prd` (same shape — fetch it by id).
+### 1. Gather context
 
-If the picked issue does not carry the `prd` label, refuse: tell the user to either label the parent as a PRD or run `/tide-to-prd` to author one.
+Work from whatever is already in the conversation context. If the user passes a Linear issue identifier (e.g. `PER-42`) as an argument, fetch it from Linear and read its full body and comments.
 
-## Repo prefix
+### 2. Explore the codebase (optional)
 
-Every Linear title this skill creates starts with `[<repo>] ` — open-bracket, the GitHub repo name returned by `gh repo view --json name -q .name`, close-bracket, single space. tide filters every Linear list query by this prefix; an unprefixed sub-issue is invisible to `tide run`. See ADR-0012.
+If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use the project's domain glossary vocabulary, and respect ADRs in the area you're touching.
 
-## What you produce
+### 3. Draft vertical slices
 
-One Linear issue per sub-issue you draft, each with:
+Break the plan into **tracer bullet** issues. Each issue is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
 
-- **Title**: `[<repo>] <short, intent-shaped headline>`. 6–10 words; active voice. The full set of sub-issue titles should read as a coherent plan, not as overlapping restatements of the PRD.
-- **Description**: at minimum —
-  - **What to build** — concrete, file/module-level scope.
-  - **Acceptance criteria** — a checkbox list. Each item is verifiable in the PR (a test passes, a file exists with such-and-such bytes, a CLI invocation prints such-and-such).
-  - **Out of scope** — what _not_ to do in this iteration (forward-references to sibling sub-issues are fine).
-- **Labels**: `ready-for-agent`. Do _not_ apply `prd` (that's the parent).
-- **Workflow state**: a non-terminal state (`Backlog` / `Todo` / lowest-position non-terminal). tide will move it to `In Progress` when its turn starts.
-- **Parent**: the PRD's id.
-- **Ordering**: where ordering matters, express it via Linear's `blockedBy` relations between sub-issues — not via title prefixes like `1.` or via numbered description rows. tide's `buildOrderedQueue` topologically sorts on `blockedBy`.
+Slices may be 'HITL' or 'AFK'. HITL slices require human interaction, such as an architectural decision or a design review. AFK slices can be implemented and merged without human interaction. Prefer AFK over HITL where possible.
 
-## Sub-issue sizing
+<vertical-slice-rules>
+- Each slice delivers a narrow but COMPLETE path through every layer (schema, API, UI, tests)
+- A completed slice is demoable or verifiable on its own
+- Prefer many thin slices over few thick ones
+</vertical-slice-rules>
 
-Each sub-issue must be small enough to finish in a single `tide run` iteration. If you find yourself drafting one whose acceptance list spans more than a few PR-shaped checkboxes, split it. If you find yourself drafting one whose only acceptance criterion is "the PRD is done", you have not actually broken it down.
+### 4. Quiz the user
 
-A reasonable test: imagine the agent emitting `<promise>DONE</promise>` after the iteration. Is the criterion you wrote checkable from the resulting commit + branch state? If not, tighten the criterion or split the sub-issue.
+Present the proposed breakdown as a numbered list. For each slice, show:
 
-## Linear writes
+- **Title**: short descriptive name
+- **Type**: HITL / AFK
+- **Blocked by**: which other slices (if any) must complete first
+- **User stories covered**: which user stories this addresses (if the source material has them)
 
-Prefer the Linear MCP `create_issue` tool with `parentId`, `labelIds`, and `stateId`. Fall back to the Linear SDK (`client.createIssue({ teamId, title, description, parentId, labelIds, stateId })`). After creating two or more sub-issues, set up `blockedBy` relations between them with the MCP `create_issue_relation` tool or the SDK's `client.createIssueRelation({ issueId, relatedIssueId, type: "blocks" })`. Resolve every `stateId` by `state.type` (lowest `position` tiebreak) — never by display-name. See `docs/agents/issue-tracker.md`.
+Ask the user:
 
-## After the sub-issues land
+- Does the granularity feel right? (too coarse / too fine)
+- Are the dependency relationships correct?
+- Should any slices be merged or split further?
+- Are the correct slices marked as HITL and AFK?
 
-Print the parent PRD's id followed by each new sub-issue's id and one-line title. The user runs `tide run` from the code repo to start working through them.
+Iterate until the user approves the breakdown.
+
+### 5. Publish the issues to Linear
+
+For each approved slice, create a Linear issue in team `{linear.team}` (read from `.tide/config.ts`), in Linear's built-in **Triage** state, with `parentId` set to the PRD's Linear issue id and the assignee set to `me` on the create call. Prefix the title with `[<repo>] ` (children are not exempt because the parent already carries it). Apply exactly one category label: `bug` or `enhancement`, depending on whether the slice fixes a defect or delivers new capability. Do **not** apply the `prd` label — sub-issues are not PRDs. Use the issue body template below.
+
+Publish issues in **dependency order** (blockers first) so that when you wire up the dependency graph the blocker's Linear id already exists.
+
+After a dependent issue is created, express each "blocked by" relationship using Linear's native `IssueRelation` (type `blocks` from blocker → blocked, equivalently `blocked_by` from blocked → blocker). This is a separate Linear MCP call after the dependent issue exists; do not write the blocker into the issue body.
+
+<issue-template>
+## What to build
+
+A concise description of this vertical slice. Describe the end-to-end behavior, not layer-by-layer implementation.
+
+## Acceptance criteria
+
+- [ ] Criterion 1
+- [ ] Criterion 2
+- [ ] Criterion 3
+
+</issue-template>
+
+The parent reference is carried natively by Linear's `parentId`, and blocker relationships are carried natively by `IssueRelation` — neither needs a section in the issue body.
+
+Do NOT close or modify the parent PRD issue.
+
+### 6. Offer bulk promotion to Backlog + `ready-for-agent`
+
+After all sub-issues are created and their parent / blocker relations are wired up, output the Linear identifiers of the PRD and each new sub-issue (e.g. `PER-42`, `PER-43`, …) and prompt the user with a single yes/no question, **default yes**:
+
+> Move PRD + N sub-issues to Backlog + `ready-for-agent`?
+
+On **yes**: for the PRD and each newly-created sub-issue, if the issue is currently in Linear's **Triage** state, transition it to **Backlog** and add the `ready-for-agent` label. Skip any issue that is already in a non-Triage state (idempotency — the user may have promoted the PRD via `tide-triage` before running breakdown). Report which issues were transitioned and which were skipped.
+
+This bulk promotion intentionally **does not** post the agent brief comment that `tide-triage`'s canonical `ready-for-agent` transition would. Sub-issues coming out of this flow have a structured body (`What to build` + `Acceptance criteria` derived from the approved PRD breakdown) and a parent PRD link, which together stand in for the brief. Do not emit a separate brief comment, and do not treat the absence of one as a defect when those issues are later picked up.
+
+On **no**: leave everything in Triage. The user can promote individual issues later via `tide-triage` (which will then ask whether to write an agent brief at promotion time).
