@@ -716,6 +716,8 @@ export async function runIssueQueue(
           root.kind === "prd" && parentContent !== undefined
             ? { ...parentContent, identifier: root.identifier }
             : undefined,
+        featureBranch: branch,
+        baseBranch,
       });
 
       const workingLogPath = buildLogPath({

@@ -862,8 +862,11 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     ]);
     const args = capturedOpts.promptArgs as Record<string, string>;
     expect(args.ISSUE_ID).toBe("ENG-7");
-    // SOURCE_BRANCH / TARGET_BRANCH are sandcastle built-ins; they must not
-    // appear in promptArgs (the SDK rejects overrides).
+    // FEATURE_BRANCH / BASE_BRANCH are tide-owned and supersede sandcastle's
+    // built-in SOURCE_BRANCH / TARGET_BRANCH (ADR-0014); the runner threads
+    // the caller-supplied `branch` and `baseBranch` through.
+    expect(args.FEATURE_BRANCH).toBe("user/feature/eng-7");
+    expect(args.BASE_BRANCH).toBe("main");
     expect(args.SOURCE_BRANCH).toBeUndefined();
     expect(args.TARGET_BRANCH).toBeUndefined();
   });

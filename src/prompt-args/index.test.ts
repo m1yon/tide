@@ -9,7 +9,7 @@ const baseParent: IssueContent = {
 };
 
 describe("buildPromptArgs", () => {
-  it("renders an issue with title, body, and a single comment with the five non-branch keys present", () => {
+  it("renders an issue with title, body, and a single comment with all keys present", () => {
     const issue: IssueContent = {
       identifier: "ENG-104",
       title: "Sub-issue four",
@@ -19,12 +19,16 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
+      featureBranch: "feature/eng-104",
+      baseBranch: "master",
     });
 
-    // SOURCE_BRANCH / TARGET_BRANCH are injected by sandcastle and must not
-    // appear here — overriding them via promptArgs is rejected by the SDK.
+    // FEATURE_BRANCH / BASE_BRANCH are tide-owned and supersede sandcastle's
+    // built-in SOURCE_BRANCH / TARGET_BRANCH (ADR-0014).
     expect(Object.keys(args).sort()).toEqual(
       [
+        "BASE_BRANCH",
+        "FEATURE_BRANCH",
         "ISSUE_CONTENT",
         "ISSUE_ID",
         "ISSUE_TITLE",
@@ -37,6 +41,8 @@ describe("buildPromptArgs", () => {
     expect(args.PARENT_ID).toBe("ENG-100");
     expect(args.ISSUE_TITLE).toBe("Sub-issue four");
     expect(args.PRD_CONTENT).toBe("This PRD describes the example feature.");
+    expect(args.FEATURE_BRANCH).toBe("feature/eng-104");
+    expect(args.BASE_BRANCH).toBe("master");
 
     // ISSUE_CONTENT markdown structure.
     const content = args.ISSUE_CONTENT as string;
@@ -65,6 +71,8 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
+      featureBranch: "feature/eng-200",
+      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Body");
@@ -81,6 +89,8 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
+      featureBranch: "feature/eng-201",
+      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("### Title");
@@ -95,15 +105,23 @@ describe("buildPromptArgs", () => {
       body: "Direct body.",
       comments: ["Note from triager"],
     };
-    const args = buildPromptArgs({ issue });
+    const args = buildPromptArgs({
+      issue,
+      featureBranch: "feature/eng-300",
+      baseBranch: "main",
+    });
 
     expect(Object.keys(args).sort()).toEqual([
+      "BASE_BRANCH",
+      "FEATURE_BRANCH",
       "ISSUE_CONTENT",
       "ISSUE_ID",
       "ISSUE_TITLE",
     ]);
     expect(args.ISSUE_ID).toBe("ENG-300");
     expect(args.ISSUE_TITLE).toBe("Standalone issue");
+    expect(args.FEATURE_BRANCH).toBe("feature/eng-300");
+    expect(args.BASE_BRANCH).toBe("main");
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("Direct body.");
     expect(content).toContain("Note from triager");
@@ -121,6 +139,8 @@ describe("buildPromptArgs", () => {
     const args = buildPromptArgs({
       issue,
       parent: baseParent,
+      featureBranch: "feature/eng-202",
+      baseBranch: "master",
     });
     const content = args.ISSUE_CONTENT as string;
     expect(content).toContain("`code`");

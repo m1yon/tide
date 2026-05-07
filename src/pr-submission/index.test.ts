@@ -346,22 +346,22 @@ describe("buildPrPromptArgs", () => {
     });
     expect(Object.keys(args).sort()).toEqual(
       [
+        "BASE_BRANCH",
+        "FEATURE_BRANCH",
         "PR_TITLE",
         "REPO_NAME",
         "REPO_OWNER",
         "ROOT_ID",
         "ROOT_TITLE",
         "ROOT_URL",
-        "SOURCE_BRANCH",
         "SUB_ISSUES_BLOCK",
-        "TARGET_BRANCH",
       ].sort()
     );
     expect(args.ROOT_ID).toBe("MEC-123");
     expect(args.ROOT_TITLE).toBe("PRD: example feature");
     expect(args.ROOT_URL).toBe("https://linear.app/acme/issue/MEC-123");
-    expect(args.SOURCE_BRANCH).toBe("feature/per-32");
-    expect(args.TARGET_BRANCH).toBe("master");
+    expect(args.FEATURE_BRANCH).toBe("feature/per-32");
+    expect(args.BASE_BRANCH).toBe("master");
     expect(args.REPO_OWNER).toBe("acme");
     expect(args.REPO_NAME).toBe("widget");
     expect(args.PR_TITLE).toBe("[MEC-123] PRD: example feature");

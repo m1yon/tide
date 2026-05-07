@@ -187,7 +187,7 @@ export async function resolveBaseBranch(
 // require a two-phase create-then-edit flow to inject post-creation URLs.
 const PR_PROMPT_TEMPLATE = `You are submitting a pull request rooted at Linear issue {{ROOT_ID}}: {{ROOT_TITLE}}.
 
-The current working branch is \`{{SOURCE_BRANCH}}\` (already pushed to origin). Open a pull request against the base branch \`{{TARGET_BRANCH}}\` for the repository \`{{REPO_OWNER}}/{{REPO_NAME}}\`.
+The current working branch is \`{{FEATURE_BRANCH}}\` (already pushed to origin). Open a pull request against the base branch \`{{BASE_BRANCH}}\` for the repository \`{{REPO_OWNER}}/{{REPO_NAME}}\`.
 
 # Context
 
@@ -253,8 +253,8 @@ Run \`gh pr create\` against the right base. A safe invocation:
 
     gh pr create \\
       --repo {{REPO_OWNER}}/{{REPO_NAME}} \\
-      --base {{TARGET_BRANCH}} \\
-      --head {{SOURCE_BRANCH}} \\
+      --base {{BASE_BRANCH}} \\
+      --head {{FEATURE_BRANCH}} \\
       --title '{{PR_TITLE}}' \\
       --body-file <(cat <<'PR_BODY_EOF'
     <your fully-rendered body here, with no closing magic word>
@@ -350,8 +350,8 @@ export function buildPrPromptArgs(
     ROOT_ID: input.rootIdentifier,
     ROOT_TITLE: sanitizeInline(input.rootTitle),
     ROOT_URL: input.rootUrl,
-    SOURCE_BRANCH: input.branch,
-    TARGET_BRANCH: input.baseBranch,
+    FEATURE_BRANCH: input.branch,
+    BASE_BRANCH: input.baseBranch,
     REPO_OWNER: input.repoOwner,
     REPO_NAME: input.repoName,
     SUB_ISSUES_BLOCK: renderSubIssuesBlock(input.subIssues),
