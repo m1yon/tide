@@ -69,6 +69,10 @@ The single **sandbox** tide creates once per `tide run` and reuses across every 
 **Commit reference**:
 Every commit the agent makes on the feature branch is prefixed with the non-closing Linear magic word `ref <linear-id>` (e.g. `ref MEC-123`). This links the commit to the **Sub-issue** in Linear's UI without transitioning state.
 
+**PR title**:
+The exact form `[<linear-id>] <root-title>`, where `<linear-id>` is the **PRD** or **Standalone Issue** identifier (e.g. `PER-76`) and `<root-title>` is that root's Linear title with the leading **Repo prefix** stripped. Computed host-side as a pure function and passed into the PR-submission prompt as `{{PR_TITLE}}` — the agent does not author it. Survives a squash-merge into `master`, where the PR title becomes the merge-commit subject and is the only place a Linear identifier remains in `git log` (the per-commit `ref <linear-id>` prefixes from **Commit reference** are discarded by squash). Replaces the prior agent-authored Conventional Commits format.
+_Avoid_: "PR subject" (collides with email-thread vocabulary), conflating with the **Repo prefix** (different prefix, different surface — Linear titles vs GitHub PR titles).
+
 **PR body**:
 Keeps the existing six-section emoji template (🚩 Problem / 💡 Solution / 🏗 Interface Movements / 📦 Package Breakdowns / 🧹 Housekeeping). Tide emits no closing magic words — neither GitHub `Closes #NN` nor Linear `Fixes MEC-X` — to avoid double-driving the **PRD** transition and to remove all GitHub-issue dependency. Linear-PRD identifier + URL appear in the body for human readers only.
 
