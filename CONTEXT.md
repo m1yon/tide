@@ -89,6 +89,10 @@ A **Sub-issue** the runner ran an iteration on during this `tide run` — includ
 The runtime symlink `<repoRoot>/.sandcastle` → **config directory** (`.tide/`) that redirects sandcastle's hardcoded `.sandcastle/{worktrees,logs}/` writes into tide's convention. Considered "intact" only when present and pointing at `.tide/`; any other on-disk shape (missing, broken target, real directory, regular file) is a broken **sandcastle bridge** and silently breaks subsequent `tide run` invocations at the worktree-collision check. Repaired by `tide setup`, detected by `tide doctor`. Removable once sandcastle exposes a config-directory override (see CONTEXT.md Flagged ambiguities).
 _Avoid_: "sandcastle symlink" (implementation-leaky), "config-dir bridge" (collides with **config directory**).
 
+**Repo prefix**:
+The `[<repo>] ` token (open-bracket, repo name, close-bracket, single space) at the start of every Linear issue title that tide will see. `<repo>` is the GitHub repo name returned by `gh repo view --json name` for the working tree (same source as the rest of tide's repo identity per `src/gh-identity/index.ts`). Lets one Linear team back multiple repos: tide filters every Linear list query by `title: { startsWith: "[<repo>] " }`, so wrong-repo and unprefixed issues are invisible to the picker, the queue build, and the **queue rebuild**. The skills `linear-triage`, `linear-to-prd`, and `linear-to-issues` are responsible for writing the prefix at issue-creation time; tide is responsible for filtering on it at every fetch.
+_Avoid_: "repo tag" (collides with git tags), "repo bracket" (form, not function).
+
 ## Flagged ambiguities
 
 - Old `PRD` label (capital, per ADR 0002) meant "tide-created mirror of a GitHub parent". New `prd` (lowercase) means "user-declared tide-runnable PRD". Different semantics — ADR 0002 will be superseded.
