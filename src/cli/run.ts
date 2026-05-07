@@ -34,6 +34,12 @@ import {
   type CreateWorktreeOptions,
   type Worktree,
 } from "@ai-hero/sandcastle";
+import {
+  decideBranchOverride,
+  promptBranchOverride as defaultPromptBranchOverride,
+  type BranchOverrideOutcome,
+  type PromptBranchOverrideInput,
+} from "../branch-override/index.ts";
 import { createBridgeIfMissing } from "../sandcastle-bridge/index.ts";
 import { build as defaultBuild, type BuildOptions } from "./build.ts";
 import { loadConfig, type TideConfig } from "../config-loader/index.ts";
@@ -205,6 +211,15 @@ export interface RunQueueAfterPickOptions {
    * detection reuses an existing managed worktree on the next invocation).
    */
   createWorktree?: (opts: CreateWorktreeOptions) => Promise<Worktree>;
+  /**
+   * Test seam — defaults to the `branch-override` module's clack `select`
+   * wrapper. Fires only when the user's current branch differs from the
+   * picked root's `branchName`; tests stub it to drive the prompted-Linear,
+   * prompted-current, and cancelled paths without rendering UI.
+   */
+  promptBranchOverride?: (
+    input: PromptBranchOverrideInput
+  ) => Promise<BranchOverrideOutcome>;
 }
 
 export interface RunPrTailStepOptions {
@@ -398,22 +413,42 @@ export async function runQueueAfterPick(
   const transitionRootToInReviewFn =
     opts.transitionRootToInReview ?? defaultTransitionToInReview;
   const createWorktreeFn = opts.createWorktree ?? defaultCreateWorktree;
+  const promptBranchOverrideFn =
+    opts.promptBranchOverride ?? defaultPromptBranchOverride;
 
   const root = rootMetaFromPicked(opts.picked);
 
-  // Pre-flight: refuse to run from the picked root's feature branch. The
-  // base branch we resolved at startup is whatever the user invoked `tide
-  // run` from; if it matches the root's auto-generated `branchName`, the
-  // user has already checked out the feature branch and would otherwise
-  // stack the new PR on top of itself. Fail before any Linear write or
-  // sandbox launch.
-  if (root.branchName === opts.baseBranch) {
-    log.error(
-      `tide run must be invoked from the base branch, not the feature branch (${opts.baseBranch}). Switch back to your base branch and re-run.`
-    );
-    outro("Aborted.");
-    return 1;
+  // Branch override: when the user's current branch matches the picked
+  // root's auto-generated `branchName`, proceed silently with Linear's
+  // branch (the "I'm on the right branch already" path doesn't waste a
+  // keystroke). Otherwise prompt with Linear's branch as the default and
+  // the user's current branch as the second option — the chosen value
+  // becomes the Feature worktree's branch. Replaces the prior pre-flight
+  // gate that errored out when the user's current branch was the picked
+  // root's feature branch.
+  const decision = decideBranchOverride({
+    currentBranch: opts.baseBranch,
+    pickedBranchName: root.branchName,
+  });
+  let featureBranch: string;
+  if (decision.kind === "silent") {
+    featureBranch = decision.branch;
+  } else {
+    const result = await promptBranchOverrideFn({
+      linearBranch: decision.linearBranch,
+      currentBranch: decision.currentBranch,
+    });
+    if (result.kind === "cancelled") {
+      cancel("Cancelled at branch selection.");
+      return 0;
+    }
+    featureBranch = result.branch;
   }
+  // The override is "taken" when the user picked their own branch instead
+  // of Linear's. Used at end-of-run to flag the merge-driven Done
+  // transition that won't fire (Linear's GitHub integration cannot match
+  // a non-Linear branch back to the root).
+  const overrideTaken = featureBranch !== root.branchName;
 
   let orderedIssues: OrderedIssue[];
 
@@ -451,7 +486,7 @@ export async function runQueueAfterPick(
         ? [{ id: root.id, identifier: root.identifier, title: root.title }]
         : queue.ordered;
 
-    log.info(`Branch: ${root.branchName}`);
+    log.info(`Branch: ${featureBranch}`);
     if (queue.kind === "standalone") {
       log.info(
         "Standalone PRD (no `ready-for-agent` direct children) — running the PRD itself."
@@ -481,11 +516,11 @@ export async function runQueueAfterPick(
     orderedIssues = [
       { id: root.id, identifier: root.identifier, title: root.title },
     ];
-    log.info(`Branch: ${root.branchName}`);
+    log.info(`Branch: ${featureBranch}`);
     log.info(`Standalone Issue: 1 iteration on ${root.identifier}.`);
   }
 
-  const proceed = await confirmRunFn(orderedIssues.length, root.branchName);
+  const proceed = await confirmRunFn(orderedIssues.length, featureBranch);
   if (!proceed) {
     cancel("Cancelled before any run() invocation.");
     return 0;
@@ -550,7 +585,7 @@ export async function runQueueAfterPick(
     featureWorktree = await createWorktreeFn({
       branchStrategy: {
         type: "branch",
-        branch: root.branchName,
+        branch: featureBranch,
         baseBranch: opts.baseBranch,
       },
       cwd: opts.repoRoot,
@@ -568,7 +603,7 @@ export async function runQueueAfterPick(
         ? { kind: "prd", id: root.id, identifier: root.identifier }
         : { kind: "standalone" },
     orderedIssues,
-    branch: root.branchName,
+    branch: featureBranch,
     baseBranch: opts.baseBranch,
     linearCtx: opts.linearCtx,
     repoRoot: opts.repoRoot,
@@ -608,7 +643,7 @@ export async function runQueueAfterPick(
   const tail = await runPrTailStepFn({
     prCreationConfirmed,
     ghRepo: opts.ghRepo,
-    branch: root.branchName,
+    branch: featureBranch,
     baseBranch: opts.baseBranch,
     rootIdentifier: root.identifier,
     rootTitle: root.title,
@@ -670,10 +705,24 @@ export async function runQueueAfterPick(
   // opened on this run, so Linear's GitHub integration won't auto-transition
   // the root to Done on merge. Surface this as a yellow warning so the user
   // can transition manually if they're shipping outside this run.
+  //
+  // Override-induced Done warning: when a PR *was* opened but the user took
+  // the Branch override, the PR's branch is not Linear's auto-generated
+  // `branchName`, so Linear's GitHub integration cannot match the PR back
+  // to the root on merge — the merge-driven *In Review → Done* transition
+  // will not fire. The host-driven *Triage → In Progress → In Review*
+  // chain (ADR-0009) is branch-name-independent and continues to fire.
+  // Suppressed when no PR was opened: the no-merge warning above already
+  // covers manual-transition messaging in that case.
   if (tail.outcome.kind !== "opened") {
     const label = opts.picked.kind === "prd" ? "PRD" : "Issue";
     log.warn(
       `${label} ${root.identifier} will not auto-transition. Transition manually in Linear if shipping outside this run.`
+    );
+  } else if (overrideTaken) {
+    const label = opts.picked.kind === "prd" ? "PRD" : "Issue";
+    log.warn(
+      `${label} ${root.identifier}: Branch override active — PR opened on ${featureBranch}, not Linear's ${root.branchName}. Linear cannot match the branch back to the root, so the merge-driven In Review → Done transition will not fire. Transition manually in Linear after merge.`
     );
   }
 
