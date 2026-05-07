@@ -29,6 +29,7 @@ import {
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { GhRepo } from "../github/index.ts";
+import { repoTitlePrefix } from "../linear/index.ts";
 import { DONE_SIGNAL, type SandboxRunFn } from "../runner/index.ts";
 
 export interface ShellResult {
@@ -172,10 +173,11 @@ export async function resolveBaseBranch(
 
 // Bundled, interface-emphasizing PR template. Renders five body sections
 // (🚩 The Problem · 💡 The Solution · 🏗 Interface Movements · 📦 Package
-// Breakdowns · 🧹 Housekeeping & Secondary Changes) plus a Conventional
-// Commits title rule. The agent classifies changed identifiers as
-// public/private using the rules in the `Interface Movements` section and
-// populates the table only with public surface that actually moved.
+// Breakdowns · 🧹 Housekeeping & Secondary Changes) and wires a host-
+// computed `{{PR_TITLE}}` into the `gh pr create --title` argument. The
+// agent classifies changed identifiers as public/private using the rules in
+// the `Interface Movements` section and populates the table only with public
+// surface that actually moved.
 //
 // No closing magic word is emitted (neither GitHub `Closes #` nor Linear
 // `Fixes`). The PR↔PRD link is the branch name alone — Linear's GitHub
@@ -194,13 +196,7 @@ The current working branch is \`{{SOURCE_BRANCH}}\` (already pushed to origin). 
 
 # Title
 
-Use Conventional Commits: \`<type>(<scope>): <subject>\`.
-
-- \`<type>\` is one of \`feat\`, \`fix\`, \`chore\`, \`docs\`, \`refactor\`, \`test\`, \`build\`, \`ci\`, \`perf\`, \`style\`. Pick the type that best matches the headline change in the diff.
-- \`<scope>\` is the package or area touched. Optional — omit it for multi-package PRDs that span scopes.
-- \`<subject>\` is a concise, imperative-mood summary derived from the diff.
-
-Examples: \`feat(runner): add per-iteration timeout\` or \`refactor: extract pr-submission module\`.
+Use this exact title: {{PR_TITLE}}
 
 # Body — sections in this exact order
 
@@ -259,7 +255,7 @@ Run \`gh pr create\` against the right base. A safe invocation:
       --repo {{REPO_OWNER}}/{{REPO_NAME}} \\
       --base {{TARGET_BRANCH}} \\
       --head {{SOURCE_BRANCH}} \\
-      --title "<your title here>" \\
+      --title '{{PR_TITLE}}' \\
       --body-file <(cat <<'PR_BODY_EOF'
     <your fully-rendered body here, with no closing magic word>
     PR_BODY_EOF
@@ -298,6 +294,41 @@ function renderSubIssuesBlock(subs: readonly SubIssueRef[]): string {
   return `- Sub-issues addressed (in order):\n${bullets}`;
 }
 
+export interface BuildPrTitleInput {
+  /** Linear root identifier (e.g. "PER-76"). */
+  rootIdentifier: string;
+  /** Root issue's Linear title. May carry the leading `[<repoName>] ` Repo
+   * prefix; if so, that prefix is stripped exactly once. */
+  rootTitle: string;
+  /** GitHub repo name. Used to recognise the working repo's own Repo prefix
+   * for stripping; non-matching bracketed prefixes are preserved. */
+  repoName: string;
+}
+
+/**
+ * Pure: compute the deterministic GitHub PR title `[<rootIdentifier>] <root-title>`.
+ *
+ * `rootTitle` is first whitespace-collapsed and trimmed (matching the
+ * existing `sanitizeInline` treatment applied to other prompt-substituted
+ * titles), then the working repo's own `[<repoName>] ` Repo prefix is
+ * stripped exactly once if present. A non-matching bracketed prefix
+ * (e.g. `[other] ` where `other !== repoName`) is preserved — only the
+ * working repo's prefix is removed, so the strip is symmetric with the
+ * triage / to-prd / to-issues skills that write the prefix at issue-
+ * creation time (ADR-0012). Idempotent: a `rootTitle` already lacking the
+ * prefix passes through unchanged.
+ *
+ * See ADR-0013.
+ */
+export function buildPrTitle(input: BuildPrTitleInput): string {
+  const sanitized = sanitizeInline(input.rootTitle);
+  const prefix = repoTitlePrefix(input.repoName);
+  const stripped = sanitized.startsWith(prefix)
+    ? sanitized.slice(prefix.length)
+    : sanitized;
+  return `[${input.rootIdentifier}] ${stripped}`;
+}
+
 /**
  * Pure: build the `{{KEY}}` substitution map for the bundled PR prompt
  * template. Returns numbers as numbers and strings as strings so the
@@ -306,6 +337,11 @@ function renderSubIssuesBlock(subs: readonly SubIssueRef[]): string {
  * breaking the surrounding markdown. The "Sub-issues addressed" block is
  * rendered conditionally — present for PRD roots (non-empty subIssues),
  * omitted for Standalone Issue roots (empty subIssues).
+ *
+ * `PR_TITLE` is the host-computed deterministic GitHub PR title (ADR-0013):
+ * `[<rootIdentifier>] <root-title>`, with the leading `[<repoName>] ` Repo
+ * prefix stripped if present. The agent runs `gh pr create --title` with
+ * the substituted value verbatim.
  */
 export function buildPrPromptArgs(
   input: BuildPrPromptArgsInput
@@ -319,6 +355,11 @@ export function buildPrPromptArgs(
     REPO_OWNER: input.repoOwner,
     REPO_NAME: input.repoName,
     SUB_ISSUES_BLOCK: renderSubIssuesBlock(input.subIssues),
+    PR_TITLE: buildPrTitle({
+      rootIdentifier: input.rootIdentifier,
+      rootTitle: input.rootTitle,
+      repoName: input.repoName,
+    }),
   };
 }
 

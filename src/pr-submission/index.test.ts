@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   buildPrPromptArgs,
+  buildPrTitle,
   countCommitsAhead,
   resolveBaseBranch,
   runPrSubmission,
@@ -233,8 +234,7 @@ describe("runPrSubmission", () => {
     expect(receivedRunOptions.prompt).not.toContain(
       "https://github.com/acme/widget/issues/"
     );
-    // The bundled rich template ships all six sections plus a Conventional
-    // Commits title rule.
+    // The bundled rich template ships all five body sections.
     expect(receivedRunOptions.prompt).toContain("🚩 The Problem");
     expect(receivedRunOptions.prompt).toContain("💡 The Solution");
     expect(receivedRunOptions.prompt).toContain("🏗 Interface Movements");
@@ -242,7 +242,19 @@ describe("runPrSubmission", () => {
     expect(receivedRunOptions.prompt).toContain(
       "🧹 Housekeeping & Secondary Changes"
     );
-    expect(receivedRunOptions.prompt).toContain("Conventional Commits");
+    // The `# Title` section reduces to a one-line directive wiring the
+    // host-computed `{{PR_TITLE}}` (ADR-0013). Conventional Commits and the
+    // type/scope/subject vocabulary are gone.
+    expect(receivedRunOptions.prompt).toContain(
+      "Use this exact title: [MEC-123] PRD: example feature"
+    );
+    expect(receivedRunOptions.prompt).not.toContain("Conventional Commits");
+    expect(receivedRunOptions.prompt).not.toContain("<type>(<scope>)");
+    expect(receivedRunOptions.prompt).not.toContain("<subject>");
+    // The example `gh pr create` substitutes the title in single-quoted form.
+    expect(receivedRunOptions.prompt).toContain(
+      "--title '[MEC-123] PRD: example feature'"
+    );
     // Ordered sub-issue list shows up in the rendered prompt.
     expect(receivedRunOptions.prompt).toContain("#8 Foundation tracer");
     expect(receivedRunOptions.prompt).toContain("#9 Pre-flight clack confirm");
@@ -334,6 +346,7 @@ describe("buildPrPromptArgs", () => {
     });
     expect(Object.keys(args).sort()).toEqual(
       [
+        "PR_TITLE",
         "REPO_NAME",
         "REPO_OWNER",
         "ROOT_ID",
@@ -351,6 +364,16 @@ describe("buildPrPromptArgs", () => {
     expect(args.TARGET_BRANCH).toBe("master");
     expect(args.REPO_OWNER).toBe("acme");
     expect(args.REPO_NAME).toBe("widget");
+    expect(args.PR_TITLE).toBe("[MEC-123] PRD: example feature");
+  });
+
+  it("computes PR_TITLE with the working repo's `[<repoName>] ` prefix stripped", () => {
+    const args = buildPrPromptArgs({
+      ...baseInput,
+      rootTitle: "[widget] PRD: example feature",
+      subIssues: [],
+    });
+    expect(args.PR_TITLE).toBe("[MEC-123] PRD: example feature");
   });
 
   it("omits the entire `Sub-issues addressed` block when subIssues is empty (Standalone Issue root)", () => {
@@ -409,5 +432,84 @@ describe("buildPrPromptArgs", () => {
     expect(args.SUB_ISSUES_BLOCK).toBe(
       "- Sub-issues addressed (in order):\n- #1 spaced"
     );
+  });
+});
+
+describe("buildPrTitle", () => {
+  it("composes `[<rootIdentifier>] <root-title>` for a bare title with no Repo prefix", () => {
+    expect(
+      buildPrTitle({
+        rootIdentifier: "PER-76",
+        rootTitle: "add linear issue prefix to PR title",
+        repoName: "tide",
+      })
+    ).toBe("[PER-76] add linear issue prefix to PR title");
+  });
+
+  it("strips the working repo's `[<repoName>] ` prefix before composing the title", () => {
+    expect(
+      buildPrTitle({
+        rootIdentifier: "PER-76",
+        rootTitle: "[tide] add linear issue prefix to PR title",
+        repoName: "tide",
+      })
+    ).toBe("[PER-76] add linear issue prefix to PR title");
+  });
+
+  it("is idempotent: titles already lacking the Repo prefix pass through unchanged", () => {
+    const first = buildPrTitle({
+      rootIdentifier: "PER-76",
+      rootTitle: "add linear issue prefix to PR title",
+      repoName: "tide",
+    });
+    const second = buildPrTitle({
+      rootIdentifier: "PER-76",
+      rootTitle: first.replace(/^\[PER-76\] /, ""),
+      repoName: "tide",
+    });
+    expect(second).toBe(first);
+  });
+
+  it("preserves a non-matching bracketed prefix (`[other] ` where other !== repoName)", () => {
+    expect(
+      buildPrTitle({
+        rootIdentifier: "PER-76",
+        rootTitle: "[other] add linear issue prefix to PR title",
+        repoName: "tide",
+      })
+    ).toBe("[PER-76] [other] add linear issue prefix to PR title");
+  });
+
+  it("collapses internal whitespace (newlines, tabs, multiple spaces) and trims, before composing", () => {
+    expect(
+      buildPrTitle({
+        rootIdentifier: "PER-76",
+        rootTitle: "  add\tlinear\nissue   prefix  ",
+        repoName: "tide",
+      })
+    ).toBe("[PER-76] add linear issue prefix");
+  });
+
+  it("strips Repo prefix even when whitespace inside the title was originally awkward", () => {
+    // Sanitization runs before the prefix strip, so a title like
+    // `[tide]\nfoo` collapses to `[tide] foo` and then gets stripped to
+    // `foo`. Matches the byte-for-byte form the triage skill writes.
+    expect(
+      buildPrTitle({
+        rootIdentifier: "PER-76",
+        rootTitle: "[tide]\nfoo",
+        repoName: "tide",
+      })
+    ).toBe("[PER-76] foo");
+  });
+
+  it("strips the prefix only once — never double-strips a `[<repo>] [<repo>] ` chain", () => {
+    expect(
+      buildPrTitle({
+        rootIdentifier: "PER-76",
+        rootTitle: "[tide] [tide] foo",
+        repoName: "tide",
+      })
+    ).toBe("[PER-76] [tide] foo");
   });
 });
