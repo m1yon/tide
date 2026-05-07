@@ -29,6 +29,7 @@ import {
   isCancel,
   cancel,
 } from "@clack/prompts";
+import { spawn } from "node:child_process";
 import {
   createWorktree as defaultCreateWorktree,
   type CreateWorktreeOptions,
@@ -252,6 +253,27 @@ export interface RunQueueAfterPickOptions {
    * without rendering UI.
    */
   promptPrTarget?: (input: PromptPrTargetInput) => Promise<PrTargetOutcome>;
+  /**
+   * Test seam — defaults to a clack `confirm`. Fires when the resolved
+   * `featureBranch` matches the user's `currentBranch` (silent override or
+   * override-take path). The user's main checkout has the branch, which
+   * sandcastle's `createWorktree` would otherwise refuse with "Branch is
+   * already checked out". Returning `true` releases the branch via
+   * `gitSwitch(repoRoot, baseBranch)`; `false` cancels the run cleanly with
+   * no Linear writes.
+   */
+  confirmReleaseBranch?: (input: {
+    branch: string;
+    baseBranch: string;
+    repoRoot: string;
+  }) => Promise<boolean>;
+  /**
+   * Test seam — defaults to a child_process `git -C <repoRoot> switch
+   * <branch>`. Throws with the git stderr on non-zero exit (typical:
+   * uncommitted changes that would be overwritten). Used by the pre-flight
+   * release step described on `confirmReleaseBranch`.
+   */
+  gitSwitch?: (repoRoot: string, branch: string) => Promise<void>;
 }
 
 export interface RunPrTailStepOptions {
@@ -403,6 +425,50 @@ async function defaultConfirmPr(): Promise<boolean> {
   return !isCancel(answer) && answer;
 }
 
+async function defaultConfirmReleaseBranch(input: {
+  branch: string;
+  baseBranch: string;
+  repoRoot: string;
+}): Promise<boolean> {
+  const answer = await confirm({
+    message:
+      `Branch '${input.branch}' is checked out at ${input.repoRoot}. ` +
+      `Switch this checkout to '${input.baseBranch}' so tide can take the branch?`,
+    initialValue: true,
+  });
+  if (isCancel(answer)) return false;
+  return answer;
+}
+
+function defaultGitSwitch(repoRoot: string, branch: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["-C", repoRoot, "switch", branch], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      reject(err);
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const trimmed = stderr.trim();
+      reject(
+        new Error(
+          `git switch ${branch} (in ${repoRoot}) failed (exit ${String(code ?? 0)})${
+            trimmed === "" ? "" : `: ${trimmed}`
+          }`
+        )
+      );
+    });
+  });
+}
+
 interface RootMeta {
   /** Linear UUID of the picked root. */
   id: string;
@@ -454,6 +520,9 @@ export async function runQueueAfterPick(
   const promptBranchOverrideFn =
     opts.promptBranchOverride ?? defaultPromptBranchOverride;
   const promptPrTargetFn = opts.promptPrTarget ?? defaultPromptPrTarget;
+  const confirmReleaseBranchFn =
+    opts.confirmReleaseBranch ?? defaultConfirmReleaseBranch;
+  const gitSwitchFn = opts.gitSwitch ?? defaultGitSwitch;
 
   const root = rootMetaFromPicked(opts.picked);
 
@@ -515,6 +584,39 @@ export async function runQueueAfterPick(
       return 0;
     }
     baseBranch = result.branch;
+  }
+
+  // Pre-flight: when the resolved feature branch is the branch checked out
+  // at `repoRoot` (silent override path or override-take path), sandcastle's
+  // `createWorktree` below would refuse with "Branch is already checked out
+  // in worktree at <repoRoot>". The recovery is mechanical — switch the
+  // main checkout to `baseBranch` and proceed. Fires before any Linear
+  // writes, the queue-confirm prompt, the PR-confirm prompt, and the queue
+  // build, so a cancel here costs no keystrokes downstream and leaves no
+  // state to unwind. The "checked out in some *other* worktree" case (manual
+  // `git worktree add` elsewhere) is intentionally not handled here —
+  // sandcastle's collision error remains the correct abort path for that.
+  if (featureBranch === opts.currentBranch) {
+    const release = await confirmReleaseBranchFn({
+      branch: featureBranch,
+      baseBranch,
+      repoRoot: opts.repoRoot,
+    });
+    if (!release) {
+      cancel("Cancelled at branch release.");
+      return 0;
+    }
+    try {
+      await gitSwitchFn(opts.repoRoot, baseBranch);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(msg);
+      log.info(
+        `Commit or stash any uncommitted changes in ${opts.repoRoot}, then re-run.`
+      );
+      outro("Aborted.");
+      return 1;
+    }
   }
 
   let orderedIssues: OrderedIssue[];

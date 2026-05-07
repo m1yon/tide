@@ -60,6 +60,20 @@ function makeCreateWorktreeStub(
 }
 
 /**
+ * No-op stubs for the feature-branch-release pre-flight added after
+ * PER-77's UI gap was fixed. Tests where `featureBranch === currentBranch`
+ * (silent override or override-take path) trigger the pre-flight; pass
+ * these stubs to keep the prompt + git switch invisible. The pre-flight's
+ * own behaviour is covered separately in the "feature-branch release
+ * pre-flight" describe block (and end-to-end in
+ * `run.feature-branch-collision.test.ts`).
+ */
+const releaseBranchNoopStubs = {
+  confirmReleaseBranch: () => Promise.resolve(true),
+  gitSwitch: () => Promise.resolve(),
+};
+
+/**
  * Stub the `branch-override.promptBranchOverride` test seam used by
  * `runQueueAfterPick`. Tests that don't care about the override path use
  * the default ("pick Linear's") so behaviour matches today's silent path.
@@ -1307,6 +1321,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => {
         fetchSubIssuesCalls += 1;
         return Promise.resolve([]);
@@ -1359,6 +1374,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: () => {
@@ -1478,6 +1494,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: (opts) => {
         createCalls.push(opts);
@@ -1767,6 +1784,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
@@ -1817,6 +1835,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
@@ -1913,6 +1932,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
@@ -2280,6 +2300,270 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
   });
 });
 
+describe("runQueueAfterPick — feature-branch release pre-flight", () => {
+  type WriteFn = typeof process.stdout.write;
+  let stdoutChunks: string[];
+  let originalStdoutWrite: WriteFn;
+
+  const baseConfig: TideConfig = {
+    linear: { team: "ENG" },
+    sandbox: { mounts: [] },
+    hooks: { onSandboxReady: [] },
+  };
+
+  beforeEach(() => {
+    stdoutChunks = [];
+    originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const captureStdout: WriteFn = (chunk: string | Uint8Array): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = captureStdout;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalStdoutWrite;
+  });
+
+  test("does not fire on override-not-taken path (currentBranch !== featureBranch)", async () => {
+    // User picks Linear's branch over their current one. featureBranch =
+    // root.branchName !== currentBranch. No collision possible at
+    // repoRoot, so the pre-flight is a no-op.
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let confirmReleaseCalls = 0;
+    let gitSwitchCalls = 0;
+    let createCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/wip-other",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      // promptBranchOverride defaults to "linear" → featureBranch =
+      // "user/feature/eng-7" ≠ currentBranch "user/wip-other".
+      promptBranchOverride: makePromptOverrideStub({ pick: "linear" }),
+      promptPrTarget: makePromptPrTargetStub({ branch: "master" }),
+      confirmReleaseBranch: () => {
+        confirmReleaseCalls += 1;
+        return Promise.resolve(true);
+      },
+      gitSwitch: () => {
+        gitSwitchCalls += 1;
+        return Promise.resolve();
+      },
+      createWorktree: (opts) => {
+        createCalls += 1;
+        return Promise.resolve({
+          branch:
+            opts.branchStrategy.type === "branch"
+              ? opts.branchStrategy.branch
+              : "x",
+          worktreePath: "/repo/.tide/worktrees/feature",
+          run: () => Promise.reject(new Error("not used")),
+          interactive: () => Promise.reject(new Error("not used")),
+          createSandbox: () => Promise.reject(new Error("not used")),
+          close: () => Promise.resolve({}),
+          [Symbol.asyncDispose]: () => Promise.resolve(),
+        });
+      },
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    expect(confirmReleaseCalls).toBe(0);
+    expect(gitSwitchCalls).toBe(0);
+    expect(createCalls).toBe(1);
+  });
+
+  test("user cancels the release prompt: clean exit, no Linear writes, no createWorktree", async () => {
+    // Silent override path (currentBranch === picked.branchName === featureBranch).
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let gitSwitchCalls = 0;
+    let createCalls = 0;
+    let runIssueQueueCalls = 0;
+    let transitionCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/feature/eng-7",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      promptPrTarget: makePromptPrTargetStub({ branch: "master" }),
+      confirmReleaseBranch: () => Promise.resolve(false),
+      gitSwitch: () => {
+        gitSwitchCalls += 1;
+        return Promise.resolve();
+      },
+      createWorktree: () => {
+        createCalls += 1;
+        return Promise.reject(new Error("should not be reached"));
+      },
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => {
+        transitionCalls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(gitSwitchCalls).toBe(0);
+    expect(createCalls).toBe(0);
+    expect(runIssueQueueCalls).toBe(0);
+    expect(transitionCalls).toBe(0);
+  });
+
+  test("gitSwitch failure: aborts with exit 1, no Linear writes, no createWorktree, hint surfaced", async () => {
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let createCalls = 0;
+    let runIssueQueueCalls = 0;
+    let transitionCalls = 0;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/feature/eng-7",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      promptPrTarget: makePromptPrTargetStub({ branch: "master" }),
+      confirmReleaseBranch: () => Promise.resolve(true),
+      gitSwitch: () =>
+        Promise.reject(
+          new Error("git switch master failed: uncommitted changes")
+        ),
+      createWorktree: () => {
+        createCalls += 1;
+        return Promise.reject(new Error("should not be reached"));
+      },
+      runIssueQueue: () => {
+        runIssueQueueCalls += 1;
+        return Promise.resolve({ completed: 0, flipped: 0, processed: [] });
+      },
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(true),
+      transitionRootToInProgress: () => {
+        transitionCalls += 1;
+        return Promise.resolve();
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(createCalls).toBe(0);
+    expect(runIssueQueueCalls).toBe(0);
+    expect(transitionCalls).toBe(0);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("uncommitted changes");
+    expect(out).toContain("Commit or stash");
+  });
+
+  test("override-take path: featureBranch === currentBranch triggers the pre-flight; gitSwitch called with the resolved baseBranch", async () => {
+    // Picker's branchName differs from current; user takes the override
+    // (`pick: "current"`). featureBranch = currentBranch, collision possible.
+    const picked = makePRD({
+      identifier: "ENG-7",
+      branchName: "user/feature/eng-7",
+    });
+
+    let confirmReleaseCalls = 0;
+    let capturedSwitchTarget: string | undefined;
+    let capturedSwitchRepoRoot: string | undefined;
+
+    const code = await runQueueAfterPick({
+      picked: prdRoot(picked),
+      ghRepo: { owner: "acme", repo: "widget" },
+      currentBranch: "user/wip-experiment",
+      originHead: "master",
+      linearCtx: { apiKey: "lk", teamKey: "ENG" },
+      repoRoot: "/repo",
+      config: baseConfig,
+      sandboxEnv: {},
+      fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
+      promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
+      promptPrTarget: makePromptPrTargetStub({ branch: "master" }),
+      confirmReleaseBranch: (input) => {
+        confirmReleaseCalls += 1;
+        expect(input.branch).toBe("user/wip-experiment");
+        expect(input.baseBranch).toBe("master");
+        return Promise.resolve(true);
+      },
+      gitSwitch: (repoRoot, branch) => {
+        capturedSwitchRepoRoot = repoRoot;
+        capturedSwitchTarget = branch;
+        return Promise.resolve();
+      },
+      createWorktree: makeCreateWorktreeStub(),
+      runIssueQueue: () =>
+        Promise.resolve({ completed: 1, flipped: 0, processed: [] }),
+      runPrTailStep: () =>
+        Promise.resolve({
+          outcome: { kind: "opted-out" },
+          outroMessage: "x",
+          exitCode: 0,
+        } satisfies PrTailStepResult),
+      confirmRun: () => Promise.resolve(true),
+      confirmPr: () => Promise.resolve(false),
+      transitionRootToInProgress: () => Promise.resolve(),
+    });
+
+    expect(code).toBe(0);
+    expect(confirmReleaseCalls).toBe(1);
+    expect(capturedSwitchRepoRoot).toBe("/repo");
+    expect(capturedSwitchTarget).toBe("master");
+  });
+});
+
 describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
   type WriteFn = typeof process.stdout.write;
   let stdoutChunks: string[];
@@ -2605,6 +2889,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
@@ -2680,6 +2965,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub(),
@@ -2721,6 +3007,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
@@ -2760,6 +3047,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       repoRoot: "/repo",
       config: baseConfig,
       sandboxEnv: {},
+      ...releaseBranchNoopStubs,
       fetchSubIssues: () => Promise.resolve([] as SubIssue[]),
       createWorktree: makeCreateWorktreeStub(),
       promptBranchOverride: makePromptOverrideStub({ pick: "current" }),
