@@ -605,4 +605,191 @@ describe("tide setup", () => {
       }
     });
   });
+
+  describe("bundled .claude/skills/tide-* step", () => {
+    const SKILL_FILES = [
+      ".claude/skills/tide-to-prd/SKILL.md",
+      ".claude/skills/tide-to-issues/SKILL.md",
+      ".claude/skills/tide-triage/SKILL.md",
+      ".claude/skills/tide-triage/AGENT-BRIEF.md",
+      ".claude/skills/tide-triage/OUT-OF-SCOPE.md",
+    ];
+
+    test("fresh repo: all 5 skill files are written under .claude/skills/tide-*/", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+      });
+
+      expect(code).toBe(0);
+      for (const f of SKILL_FILES) {
+        expect(existsSync(join(repoRoot, f))).toBe(true);
+      }
+    });
+
+    test("identical-bytes second run: skill files are not rewritten (mtime preserved)", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const firstCode = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: false },
+          stateCapture
+        ),
+      });
+      expect(firstCode).toBe(0);
+
+      const mtimes = new Map<string, number>();
+      for (const f of SKILL_FILES) {
+        mtimes.set(f, statSync(join(repoRoot, f)).mtimeMs);
+      }
+
+      // Pause so any rewrite would change mtime detectably.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const secondCode = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: false },
+          stateCapture
+        ),
+      });
+      expect(secondCode).toBe(0);
+      for (const f of SKILL_FILES) {
+        expect(statSync(join(repoRoot, f)).mtimeMs).toBe(mtimes.get(f) ?? -1);
+      }
+    });
+
+    test("hand-edited tide-to-prd SKILL.md is overwritten back to bundled bytes", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const skillPath = join(repoRoot, ".claude/skills/tide-to-prd/SKILL.md");
+      mkdirSync(join(repoRoot, ".claude/skills/tide-to-prd"), {
+        recursive: true,
+      });
+      const handEdited = "# I rewrote this skill\n";
+      writeFileSync(skillPath, handEdited);
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+      });
+
+      expect(code).toBe(0);
+      expect(readFileSync(skillPath, "utf8")).not.toBe(handEdited);
+      // The frontmatter `name:` proves the bundled bytes won.
+      expect(readFileSync(skillPath, "utf8")).toContain("name: tide-to-prd");
+    });
+
+    test("user-authored .claude/skills/my-custom-skill/ is left untouched", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const customDir = join(repoRoot, ".claude/skills/my-custom-skill");
+      const customFile = join(customDir, "SKILL.md");
+      mkdirSync(customDir, { recursive: true });
+      const customBody = "# my own skill\nfor my own use\n";
+      writeFileSync(customFile, customBody);
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: true },
+          stateCapture
+        ),
+      });
+
+      expect(code).toBe(0);
+      expect(readFileSync(customFile, "utf8")).toBe(customBody);
+    });
+
+    test("Linear failure does not skip skill writes", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const setupLabelsFn: SetupLabelsFn = () =>
+        Promise.reject(new Error("linear down"));
+      const provisionFn: ProvisionInReviewStateFn = () =>
+        Promise.reject(new Error("linear down"));
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: setupLabelsFn,
+        provisionInReviewState: provisionFn,
+      });
+
+      expect(code).toBe(1);
+      for (const f of SKILL_FILES) {
+        expect(existsSync(join(repoRoot, f))).toBe(true);
+      }
+    });
+  });
+
+  describe("bundled-skill bytes (frontmatter, hard-stop, repo-prefix guard)", () => {
+    test("each skill carries the required frontmatter, tide setup hard-stop, and `.tide/config.ts` guard", async () => {
+      writeValidEnv();
+      writeValidConfig();
+      const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
+      const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
+
+      const code = await setup({
+        repoRoot,
+        setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
+        provisionInReviewState: buildProvisionState(
+          { name: IN_REVIEW_STATE_NAME, created: false },
+          stateCapture
+        ),
+      });
+      expect(code).toBe(0);
+
+      const cases: { name: string; crossRef: string | null }[] = [
+        { name: "tide-to-prd", crossRef: "/tide-to-issues" },
+        { name: "tide-to-issues", crossRef: null },
+        { name: "tide-triage", crossRef: null },
+      ];
+      for (const { name, crossRef } of cases) {
+        const body = readFileSync(
+          join(repoRoot, ".claude/skills", name, "SKILL.md"),
+          "utf8"
+        );
+        expect(body).toContain(`name: ${name}`);
+        expect(body).toContain(".tide/config.ts");
+        expect(body).toContain("tide setup");
+        expect(body).toContain(`\`${name}\``);
+        if (crossRef !== null) {
+          expect(body).toContain(crossRef);
+        }
+        expect(body).not.toContain(`name: linear-`);
+      }
+
+      // tide-to-issues: no historical "merged Linear flavor" preamble.
+      const toIssues = readFileSync(
+        join(repoRoot, ".claude/skills/tide-to-issues/SKILL.md"),
+        "utf8"
+      );
+      expect(toIssues).not.toContain("merged Linear flavor");
+      expect(toIssues).not.toContain("to-issues-native");
+    });
+  });
 });

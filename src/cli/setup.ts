@@ -27,6 +27,11 @@ import promptMd from "./setup-templates/tide/prompt.md" with { type: "text" };
 import promptStandaloneMd from "./setup-templates/tide/prompt-standalone.md" with { type: "text" };
 import envExample from "./setup-templates/tide/.env.example" with { type: "text" };
 import gitignore from "./setup-templates/tide/.gitignore" with { type: "text" };
+import tideToPrdSkillMd from "./setup-templates/claude-skills/tide-to-prd/SKILL.md" with { type: "text" };
+import tideToIssuesSkillMd from "./setup-templates/claude-skills/tide-to-issues/SKILL.md" with { type: "text" };
+import tideTriageSkillMd from "./setup-templates/claude-skills/tide-triage/SKILL.md" with { type: "text" };
+import tideTriageAgentBriefMd from "./setup-templates/claude-skills/tide-triage/AGENT-BRIEF.md" with { type: "text" };
+import tideTriageOutOfScopeMd from "./setup-templates/claude-skills/tide-triage/OUT-OF-SCOPE.md" with { type: "text" };
 
 const configTs = configTsRaw as unknown as string;
 
@@ -41,6 +46,34 @@ const TIDE_SCAFFOLD: readonly { relPath: string; content: string }[] = [
   { relPath: ".tide/prompt-standalone.md", content: promptStandaloneMd },
   { relPath: ".tide/.env.example", content: envExample },
   { relPath: ".tide/.gitignore", content: gitignore },
+];
+
+/**
+ * Bundled-skill targets. tide owns these bytes — re-running setup overwrites
+ * any local edit (silently if identical). Forks live under a different name
+ * (e.g. `.claude/skills/my-to-prd/`), which tide leaves alone.
+ */
+const BUNDLED_SKILLS: readonly { relPath: string; content: string }[] = [
+  {
+    relPath: ".claude/skills/tide-to-prd/SKILL.md",
+    content: tideToPrdSkillMd,
+  },
+  {
+    relPath: ".claude/skills/tide-to-issues/SKILL.md",
+    content: tideToIssuesSkillMd,
+  },
+  {
+    relPath: ".claude/skills/tide-triage/SKILL.md",
+    content: tideTriageSkillMd,
+  },
+  {
+    relPath: ".claude/skills/tide-triage/AGENT-BRIEF.md",
+    content: tideTriageAgentBriefMd,
+  },
+  {
+    relPath: ".claude/skills/tide-triage/OUT-OF-SCOPE.md",
+    content: tideTriageOutOfScopeMd,
+  },
 ];
 
 /**
@@ -196,9 +229,23 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
   );
   const scaffoldResults = writeTemplates(scaffoldTargets);
 
+  // Step 3: bundled-skill writes. tide owns these bytes — overwrite-silent-
+  // if-identical means a no-op when the local file matches the embedded
+  // version, an mtime-changing rewrite otherwise. The scope is bounded to
+  // the `tide-*/` namespace under `.claude/skills/`; user-authored skills
+  // outside that prefix are never touched.
+  const skillTargets: WriteTarget[] = BUNDLED_SKILLS.map(
+    ({ relPath, content }) => ({
+      targetPath: join(repoRoot, relPath),
+      content,
+      policy: "overwrite-silent-if-identical",
+    })
+  );
+  const skillResults = writeTemplates(skillTargets);
+
   const created: SummaryRow[] = [];
   const existing: SummaryRow[] = [];
-  for (const r of scaffoldResults) {
+  for (const r of [...scaffoldResults, ...skillResults]) {
     const row = summaryRowFromFile(repoRoot, r);
     if (r.outcome === "created" || r.outcome === "overwritten") {
       created.push(row);
