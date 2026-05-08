@@ -11,11 +11,59 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { doctor, type ClassifyBridgeFn, type Runner } from "./doctor.ts";
+import {
+  doctor,
+  type ClassifyBridgeFn,
+  type DoctorOptions,
+  type Runner,
+} from "./doctor.ts";
+import { InMemoryLinearService } from "../services/linear/index.ts";
 import {
   classifyBridge,
   type BridgeState,
 } from "../sandcastle-bridge/index.ts";
+
+interface LinearContext {
+  apiKey: string;
+  teamKey: string;
+}
+
+type LinearViewerCheck = (apiKey: string) => Promise<void>;
+type LinearInReviewStateCheck = (ctx: LinearContext) => Promise<void>;
+
+/**
+ * Pre-Phase-1 `doctor()` took separate `linearViewerCheck` /
+ * `linearInReviewStateCheck` callbacks. After the migration both are
+ * methods on a single `LinearService`. This test compat layer wraps the
+ * legacy callbacks into a synthetic LinearService.
+ */
+interface LegacyDoctorOptions extends Omit<DoctorOptions, "linear"> {
+  linearViewerCheck?: LinearViewerCheck;
+  linearInReviewStateCheck?: LinearInReviewStateCheck;
+}
+
+function legacyDoctor(opts: LegacyDoctorOptions = {}): Promise<number> {
+  const { linearViewerCheck, linearInReviewStateCheck, ...rest } = opts;
+  if (
+    linearViewerCheck === undefined &&
+    linearInReviewStateCheck === undefined
+  ) {
+    return doctor(rest);
+  }
+  // Doctor builds the LinearService lazily from envCache + teamKeyCache so
+  // that env-loading failures don't crash the service constructor. Inject
+  // a pre-built service that delegates to the legacy callbacks.
+  const linear = new InMemoryLinearService();
+  Object.defineProperty(linear, "viewer", {
+    value: () => linearViewerCheck?.("lk") ?? Promise.resolve(),
+  });
+  Object.defineProperty(linear, "assertInReviewStatePresent", {
+    value: () =>
+      linearInReviewStateCheck?.({ apiKey: "lk", teamKey: "ENG" }) ??
+      Promise.resolve(),
+  });
+  return doctor({ ...rest, linear });
+}
 
 interface RunnerStub {
   // Map "<cmd> <args.joined-by-space>" → result
@@ -97,7 +145,7 @@ describe("tide doctor", () => {
     let viewerCalls = 0;
     let inReviewCalls = 0;
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(stub),
       linearViewerCheck: () => {
@@ -126,7 +174,7 @@ describe("tide doctor", () => {
     );
     writeValidConfig();
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
@@ -141,7 +189,7 @@ describe("tide doctor", () => {
     writeValidConfig();
     let inReviewCalls = 0;
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
@@ -164,7 +212,7 @@ describe("tide doctor", () => {
     writeValidConfig();
     const calls: { apiKey: string; teamKey: string }[] = [];
 
-    await doctor({
+    await legacyDoctor({
       repoRoot,
       runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
@@ -192,7 +240,7 @@ describe("tide doctor", () => {
       },
     };
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(stub),
       linearViewerCheck: () => Promise.resolve(),
@@ -208,7 +256,7 @@ describe("tide doctor", () => {
     writeValidConfig();
     let viewerCalls = 0;
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => {
@@ -228,7 +276,7 @@ describe("tide doctor", () => {
     writeValidConfig();
     let viewerCalls = 0;
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => {
@@ -246,7 +294,7 @@ describe("tide doctor", () => {
     writeValidEnv();
     let inReviewCalls = 0;
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => Promise.resolve(),
@@ -275,7 +323,7 @@ describe("tide doctor", () => {
       },
     };
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(stub),
       linearViewerCheck: () => Promise.resolve(),
@@ -292,7 +340,7 @@ describe("tide doctor", () => {
     writeValidConfig();
     let viewerCalls = 0;
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(happyRunnerStub()),
       linearViewerCheck: () => {
@@ -322,7 +370,7 @@ describe("tide doctor", () => {
       },
     };
 
-    const code = await doctor({
+    const code = await legacyDoctor({
       repoRoot,
       runner: buildRunner(stub),
       linearViewerCheck: () => Promise.resolve(),
@@ -342,7 +390,7 @@ describe("tide doctor", () => {
     let code: number;
     try {
       process.chdir(lonely);
-      code = await doctor({
+      code = await legacyDoctor({
         runner: buildRunner(happyRunnerStub()),
         linearViewerCheck: () => Promise.resolve(),
         linearInReviewStateCheck: () => Promise.resolve(),
@@ -397,7 +445,7 @@ describe("tide doctor", () => {
         return classifyBridge(root);
       };
 
-      const code = await doctor({
+      const code = await legacyDoctor({
         repoRoot,
         runner: buildRunner(stub),
         linearViewerCheck: () => Promise.resolve(),
@@ -415,7 +463,7 @@ describe("tide doctor", () => {
       writeValidConfig();
       symlinkSync(".tide", join(repoRoot, ".sandcastle"), "dir");
 
-      const code = await doctor({
+      const code = await legacyDoctor({
         repoRoot,
         runner: buildRunner(happyRunnerStub()),
         linearViewerCheck: () => Promise.resolve(),
@@ -430,7 +478,7 @@ describe("tide doctor", () => {
       writeValidConfig();
       // No `.sandcastle` entry created — classifyBridge returns `missing`.
 
-      const code = await doctor({
+      const code = await legacyDoctor({
         repoRoot,
         runner: buildRunner(happyRunnerStub()),
         linearViewerCheck: () => Promise.resolve(),
@@ -487,7 +535,7 @@ describe("tide doctor", () => {
         writeValidConfig();
         broken.setup();
 
-        const code = await doctor({
+        const code = await legacyDoctor({
           repoRoot,
           runner: buildRunner(happyRunnerStub()),
           linearViewerCheck: () => Promise.resolve(),
@@ -508,7 +556,7 @@ describe("tide doctor", () => {
       writeFileSync(join(repoRoot, ".sandcastle", "log.txt"), "preserve me\n");
       const before = readdirSync(join(repoRoot, ".sandcastle"));
 
-      await doctor({
+      await legacyDoctor({
         repoRoot,
         runner: buildRunner(happyRunnerStub()),
         linearViewerCheck: () => Promise.resolve(),
@@ -526,7 +574,7 @@ describe("tide doctor", () => {
       writeValidConfig();
       symlinkSync("some-other-target", join(repoRoot, ".sandcastle"), "dir");
 
-      await doctor({
+      await legacyDoctor({
         repoRoot,
         runner: buildRunner(happyRunnerStub()),
         linearViewerCheck: () => Promise.resolve(),

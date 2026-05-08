@@ -5,9 +5,9 @@ import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
 import { getGhIdentity } from "../gh-identity/index.ts";
 import {
-  assertInReviewStatePresent as defaultAssertInReviewStatePresent,
-  type LinearContext,
-} from "../linear/index.ts";
+  LinearSdkService,
+  type LinearService,
+} from "../services/linear/index.ts";
 import {
   classifyBridge as defaultClassifyBridge,
   describeBridgeForUser,
@@ -52,29 +52,6 @@ const defaultRunner: Runner = (cmd, args, cwd) =>
   });
 
 /**
- * Verifies the Linear API key against the live Linear API. Returns the viewer's
- * email on success; throws on failure. Pulled out so doctor can stub it without
- * pulling the SDK into the test graph.
- */
-export type LinearViewerCheck = (apiKey: string) => Promise<void>;
-
-const defaultLinearViewerCheck: LinearViewerCheck = async (apiKey) => {
-  const { LinearClient } = await import("@linear/sdk");
-  const client = new LinearClient({ apiKey });
-  const viewer = await client.viewer;
-  if (typeof viewer.id !== "string" || viewer.id === "") {
-    throw new Error("Linear viewer query returned an empty viewer.id");
-  }
-};
-
-/**
- * Verifies the configured Linear team has the `"In Review"` workflow state
- * tide expects. Throws on failure with a `tide setup` hint. Pulled out so
- * doctor can stub it in tests without hitting the live API.
- */
-export type LinearInReviewStateCheck = (ctx: LinearContext) => Promise<void>;
-
-/**
  * Inspects the on-disk shape of the sandcastle bridge. Pulled out as a test
  * seam so doctor tests can assert ordering against the runner's call log
  * without setting up filesystem fixtures for every state.
@@ -86,10 +63,11 @@ export interface DoctorOptions {
   repoRoot?: string;
   /** Process runner (used by tests to stub gh + docker). */
   runner?: Runner;
-  /** Linear API key check (used by tests to stub the Linear SDK). */
-  linearViewerCheck?: LinearViewerCheck;
-  /** Linear `In Review` state check (used by tests to stub the SDK). */
-  linearInReviewStateCheck?: LinearInReviewStateCheck;
+  /** Linear-facing service. Tests inject an `InMemoryLinearService`;
+   * production constructs a `LinearSdkService` inline once env+config
+   * load. Optional only because the production path cannot construct it
+   * before env+config have been loaded. */
+  linear?: LinearService;
   /** Sandcastle bridge classification (used by tests to stub on-disk shape). */
   classifyBridge?: ClassifyBridgeFn;
 }
@@ -111,10 +89,6 @@ interface Step {
  */
 export async function doctor(options: DoctorOptions = {}): Promise<number> {
   const runner = options.runner ?? defaultRunner;
-  const linearViewerCheck =
-    options.linearViewerCheck ?? defaultLinearViewerCheck;
-  const linearInReviewStateCheck =
-    options.linearInReviewStateCheck ?? defaultAssertInReviewStatePresent;
   const classifyBridgeFn = options.classifyBridge ?? defaultClassifyBridge;
 
   intro("tide doctor");
@@ -133,6 +107,28 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
   // isolation. The cached results are reused by later steps when available.
   let envCache: Record<string, string> | null = null;
   let teamKeyCache: string | null = null;
+  // Cached LinearService — built on demand from envCache + teamKeyCache,
+  // or supplied directly via `options.linear`. Used by the "Linear API"
+  // and "Linear In Review state" checks. Even when injected via options,
+  // the service is only consulted once env + config have loaded, so a
+  // missing .tide/.env / .tide/config.ts still surfaces as a skip rather
+  // than spuriously calling Linear.
+  let linearCache: LinearService | null = null;
+
+  function getLinearService(): LinearService | null {
+    if (envCache === null || teamKeyCache === null) return null;
+    const apiKey = envCache.LINEAR_API_KEY;
+    if (typeof apiKey !== "string" || apiKey === "") return null;
+    if (linearCache !== null) return linearCache;
+    linearCache =
+      options.linear ??
+      new LinearSdkService({
+        apiKey,
+        teamKey: teamKeyCache,
+        repoName: "",
+      });
+    return linearCache;
+  }
 
   const steps: Step[] = [
     {
@@ -214,21 +210,30 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
     {
       name: "Linear API",
       run: async () => {
-        if (envCache === null) {
+        const linear = getLinearService();
+        if (linear === null) {
+          if (envCache === null) {
+            return {
+              ok: false,
+              hint: "Skipped — .tide/.env did not load.",
+            };
+          }
+          const apiKey = envCache.LINEAR_API_KEY;
+          if (typeof apiKey !== "string" || apiKey === "") {
+            return {
+              ok: false,
+              hint: "LINEAR_API_KEY in .tide/.env is empty.",
+            };
+          }
+          // Fall through: the service couldn't be built but env is in
+          // place — config/teamKey must be missing.
           return {
             ok: false,
-            hint: "Skipped — .tide/.env did not load.",
-          };
-        }
-        const apiKey = envCache.LINEAR_API_KEY;
-        if (typeof apiKey !== "string" || apiKey === "") {
-          return {
-            ok: false,
-            hint: "LINEAR_API_KEY in .tide/.env is empty.",
+            hint: "Skipped — Linear team key is unavailable.",
           };
         }
         try {
-          await linearViewerCheck(apiKey);
+          await linear.viewer();
           return { ok: true };
         } catch (err) {
           return {
@@ -241,21 +246,15 @@ export async function doctor(options: DoctorOptions = {}): Promise<number> {
     {
       name: 'Linear "In Review" state',
       run: async () => {
-        if (envCache === null || teamKeyCache === null) {
+        const linear = getLinearService();
+        if (linear === null) {
           return {
             ok: false,
             hint: "Skipped — .tide/.env or .tide/config.ts did not load.",
           };
         }
-        const apiKey = envCache.LINEAR_API_KEY;
-        if (typeof apiKey !== "string" || apiKey === "") {
-          return {
-            ok: false,
-            hint: "LINEAR_API_KEY in .tide/.env is empty.",
-          };
-        }
         try {
-          await linearInReviewStateCheck({ apiKey, teamKey: teamKeyCache });
+          await linear.assertInReviewStatePresent();
           return { ok: true };
         } catch (err) {
           return {

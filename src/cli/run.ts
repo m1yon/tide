@@ -66,18 +66,11 @@ import {
   type GetGhTokenOptions,
 } from "../gh-token/index.ts";
 import type { GhRepo } from "../github/index.ts";
+import type { PRD, StandaloneIssue, SubIssue } from "../linear/index.ts";
 import {
-  assertInReviewStatePresent as defaultAssertInReviewStatePresent,
-  fetchSubIssues as defaultFetchSubIssues,
-  listPRDs as defaultListPRDs,
-  listStandaloneIssues as defaultListStandaloneIssues,
-  transitionToInProgress as defaultTransitionToInProgress,
-  transitionToInReview as defaultTransitionToInReview,
-  type LinearContext,
-  type PRD,
-  type StandaloneIssue,
-  type SubIssue,
-} from "../linear/index.ts";
+  LinearSdkService,
+  type LinearService,
+} from "../services/linear/index.ts";
 import {
   countCommitsAhead as defaultCountCommitsAhead,
   resolveCurrentBranch,
@@ -135,18 +128,14 @@ export interface RunOptions {
   getGhIdentity?: (options: GetGhIdentityOptions) => Promise<GhIdentity>;
   /** gh-token resolver. Tests stub this to avoid spawning `gh`. */
   getGhToken?: (options: GetGhTokenOptions) => Promise<string>;
-  /** Linear PRD list fetcher. Tests stub this to avoid hitting Linear. */
-  listPRDs?: (ctx: LinearContext, repoName: string) => Promise<PRD[]>;
-  /** Linear Standalone Issue list fetcher. Tests stub this. */
-  listStandaloneIssues?: (
-    ctx: LinearContext,
-    repoName: string
-  ) => Promise<StandaloneIssue[]>;
   /**
-   * Linear `"In Review"` state preflight assertion. Tests stub this to
-   * avoid hitting Linear. Defaults to `linear.assertInReviewStatePresent`.
+   * Linear-facing service. Tests inject an `InMemoryLinearService`;
+   * production constructs a `LinearSdkService` inline from the loaded env
+   * + config + gh-identity. Optional only because the production path
+   * cannot construct it before env/config have been loaded — when absent,
+   * `tideRun` builds it after every other piece of context is in place.
    */
-  assertInReviewStatePresent?: (ctx: LinearContext) => Promise<void>;
+  linear?: LinearService;
   /** Root selector prompt. Tests stub this to bypass the clack UI. */
   pickRoot?: (input: {
     prds: readonly PRD[];
@@ -186,19 +175,11 @@ export interface RunQueueAfterPickOptions {
    * Input to the **PR target branch** decision; the prompt fires
    * unconditionally with no default when `undefined`. */
   originHead: string | undefined;
-  linearCtx: LinearContext;
+  /** Linear-facing service. Threaded through to the runner unchanged. */
+  linear: LinearService;
   repoRoot: string;
   config: TideConfig;
   sandboxEnv: Record<string, string>;
-  /** Test seam — defaults to `linear.fetchSubIssues`. Used both to build
-   * the queue for PRD roots and to validate the "no children" rule for
-   * Standalone Issue roots. The `repoName` argument applies the repo-prefix
-   * scope filter from ADR-0012. */
-  fetchSubIssues?: (
-    ctx: LinearContext,
-    issueId: string,
-    repoName: string
-  ) => Promise<SubIssue[]>;
   /** Test seam — defaults to the runner module's `runIssueQueue`. */
   runIssueQueue?: (opts: RunIssueQueueOptions) => Promise<RunIssueQueueResult>;
   /** Test seam — defaults to the in-module `runPrTailStep`. */
@@ -207,25 +188,6 @@ export interface RunQueueAfterPickOptions {
   confirmRun?: (count: number, branch: string) => Promise<boolean>;
   /** Test seam — clack `confirm` for "Create a PR at the end?". */
   confirmPr?: () => Promise<boolean>;
-  /** Test seam — defaults to `linear.transitionToInProgress`. Used to
-   * transition the picked root to *In Progress* once both pre-flight
-   * confirms have been answered. For PRD roots this is the PRD itself; for
-   * Standalone Issue roots this is the issue itself. */
-  transitionRootToInProgress?: (
-    ctx: LinearContext,
-    issueId: string
-  ) => Promise<void>;
-  /**
-   * Test seam — defaults to `linear.transitionToInReview`. Fired by the
-   * post-submission hook after a clean queue + successful PR open against a
-   * PRD root, transitioning the PRD to *In Review*. Failure of this
-   * transition is non-fatal: the PR and earlier Linear writes are preserved
-   * and the failure surfaces as a warning in the run output.
-   */
-  transitionRootToInReview?: (
-    ctx: LinearContext,
-    issueId: string
-  ) => Promise<void>;
   /**
    * Test seam — defaults to sandcastle's top-level `createWorktree`. Used
    * to create the long-lived Feature worktree once per `tide run`, after
@@ -507,15 +469,11 @@ function rootMetaFromPicked(picked: RootRef): RootMeta {
 export async function runQueueAfterPick(
   opts: RunQueueAfterPickOptions
 ): Promise<number> {
-  const fetchSubIssuesFn = opts.fetchSubIssues ?? defaultFetchSubIssues;
+  const linear = opts.linear;
   const runIssueQueueFn = opts.runIssueQueue ?? defaultRunIssueQueue;
   const runPrTailStepFn = opts.runPrTailStep ?? runPrTailStep;
   const confirmRunFn = opts.confirmRun ?? defaultConfirmRun;
   const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
-  const transitionRootToInProgressFn =
-    opts.transitionRootToInProgress ?? defaultTransitionToInProgress;
-  const transitionRootToInReviewFn =
-    opts.transitionRootToInReview ?? defaultTransitionToInReview;
   const createWorktreeFn = opts.createWorktree ?? defaultCreateWorktree;
   const promptBranchOverrideFn =
     opts.promptBranchOverride ?? defaultPromptBranchOverride;
@@ -626,11 +584,7 @@ export async function runQueueAfterPick(
     subSpin.start("Fetching sub-issues from Linear");
     let subIssues: SubIssue[];
     try {
-      subIssues = await fetchSubIssuesFn(
-        opts.linearCtx,
-        root.id,
-        opts.ghRepo.repo
-      );
+      subIssues = await linear.fetchSubIssues(root.id);
     } catch (err) {
       subSpin.stop("Linear sub-issue fetch failed");
       const msg = err instanceof Error ? err.message : String(err);
@@ -704,11 +658,7 @@ export async function runQueueAfterPick(
     childSpin.start("Verifying Standalone Issue has no Linear children");
     let children: SubIssue[];
     try {
-      children = await fetchSubIssuesFn(
-        opts.linearCtx,
-        root.id,
-        opts.ghRepo.repo
-      );
+      children = await linear.fetchSubIssues(root.id);
     } catch (err) {
       childSpin.stop("Linear child fetch failed");
       const msg = err instanceof Error ? err.message : String(err);
@@ -734,7 +684,7 @@ export async function runQueueAfterPick(
   // untouched. A failure here is an infra failure — no Linear writes have
   // happened on iteration units yet, so we abort cleanly.
   try {
-    await transitionRootToInProgressFn(opts.linearCtx, root.id);
+    await linear.transitionToInProgress(root.id);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const label = opts.picked.kind === "prd" ? "PRD" : "Issue";
@@ -774,12 +724,11 @@ export async function runQueueAfterPick(
     orderedIssues,
     branch: featureBranch,
     baseBranch,
-    linearCtx: opts.linearCtx,
+    linear,
     repoRoot: opts.repoRoot,
     featureWorktreePath: featureWorktree.worktreePath,
     config: opts.config,
     sandboxEnv: opts.sandboxEnv,
-    repoName: opts.ghRepo.repo,
   });
 
   if (queueResult.abortedAt) {
@@ -843,7 +792,7 @@ export async function runQueueAfterPick(
     const rootLabel = opts.picked.kind === "prd" ? "PRD" : "Issue";
     if (queueClean) {
       try {
-        await transitionRootToInReviewFn(opts.linearCtx, root.id);
+        await linear.transitionToInReview(root.id);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.warn(
@@ -911,13 +860,8 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   const build = options.build ?? defaultBuild;
   const getGhIdentity = options.getGhIdentity ?? defaultGetGhIdentity;
   const getGhToken = options.getGhToken ?? defaultGetGhToken;
-  const listPRDsFn = options.listPRDs ?? defaultListPRDs;
-  const listStandaloneIssuesFn =
-    options.listStandaloneIssues ?? defaultListStandaloneIssues;
   const pickRootFn = options.pickRoot ?? defaultPickRoot;
   const runQueueAfterPickFn = options.runQueueAfterPick ?? runQueueAfterPick;
-  const assertInReviewStatePresentFn =
-    options.assertInReviewStatePresent ?? defaultAssertInReviewStatePresent;
 
   let repoRoot: string;
   try {
@@ -986,10 +930,25 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     sandboxEnv[k] = v;
   }
 
-  const linearCtx: LinearContext = {
-    apiKey: linearApiKey,
-    teamKey: config.linear.team,
-  };
+  // Construct the LinearService. Tests inject `options.linear` to bypass
+  // the SDK; production constructs a `LinearSdkService` from the loaded
+  // env + config. The repo name lives as a `private readonly` field on
+  // the SDK service, but `assertInReviewStatePresent` (the very next
+  // call) doesn't read it — so we can construct here with `repoName: ""`
+  // and patch the real value once `gh-identity` resolves below. This
+  // preserves the historical preflight ordering (In Review check fails
+  // before gh-identity is even attempted) without an extra service
+  // instance once the user's machine is configured.
+  let linear: LinearService;
+  if (options.linear !== undefined) {
+    linear = options.linear;
+  } else {
+    linear = new LinearSdkService({
+      apiKey: linearApiKey,
+      teamKey: config.linear.team,
+      repoName: "",
+    });
+  }
 
   // Preflight: refuse to start when the team has no "In Review" workflow
   // state. Without this gate a clean run would only discover the missing
@@ -997,7 +956,7 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   // its work — a silent fallback to Done would re-introduce the original
   // PER-51 problem.
   try {
-    await assertInReviewStatePresentFn(linearCtx);
+    await linear.assertInReviewStatePresent();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
@@ -1014,6 +973,19 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     const msg = err instanceof Error ? err.message : String(err);
     stderr(`${msg}\n`);
     return 1;
+  }
+
+  // Now that we have the working repo name, rebuild the LinearService so
+  // the listPRDs / listStandaloneIssues / fetchSubIssues calls below
+  // apply the `[<repoName>] ` title-prefix scope filter (ADR-0012).
+  // Test-injected services already encapsulate whatever repo name the
+  // test wanted; only the production-defaulted service needs reseating.
+  if (options.linear === undefined) {
+    linear = new LinearSdkService({
+      apiKey: linearApiKey,
+      teamKey: config.linear.team,
+      repoName: ghIdentity.repo,
+    });
   }
 
   // Fetch the host's GitHub token and inject it into the sandbox so the
@@ -1058,8 +1030,8 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
   let standaloneIssues: StandaloneIssue[];
   try {
     [prds, standaloneIssues] = await Promise.all([
-      listPRDsFn(linearCtx, ghIdentity.repo),
-      listStandaloneIssuesFn(linearCtx, ghIdentity.repo),
+      linear.listPRDs(),
+      linear.listStandaloneIssues(),
     ]);
   } catch (err) {
     fetchSpin.stop("Linear fetch failed");
@@ -1097,7 +1069,7 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     ghRepo: { owner: ghIdentity.owner, repo: ghIdentity.repo },
     currentBranch,
     originHead,
-    linearCtx,
+    linear,
     repoRoot,
     config,
     sandboxEnv,

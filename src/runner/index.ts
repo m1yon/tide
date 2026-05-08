@@ -60,17 +60,8 @@ import {
 import { defaultImageName, docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { log } from "@clack/prompts";
 import type { TideConfig } from "../config-loader/index.ts";
-import {
-  fetchIssueContent as defaultFetchIssueContent,
-  fetchSubIssues as defaultFetchSubIssues,
-  flipLabelToReadyForHuman as defaultFlipLabelToReadyForHuman,
-  postComment as defaultPostComment,
-  transitionToDone as defaultTransitionToDone,
-  transitionToInProgress as defaultTransitionToInProgress,
-  type LinearContext,
-  type LinearIssueContent,
-  type SubIssue,
-} from "../linear/index.ts";
+import type { LinearIssueContent, SubIssue } from "../linear/index.ts";
+import type { LinearService } from "../services/linear/index.ts";
 import { buildPromptArgs } from "../prompt-args/index.ts";
 import { buildOrderedQueue } from "../queue-build/index.ts";
 import { readFinalAssistantMessage as defaultReadFinalAssistantMessage } from "../transcript-extract/index.ts";
@@ -173,8 +164,10 @@ export interface RunIssueQueueOptions {
   /** Branch the eventual PR will merge into. Feeds the in-prompt `git log
    * <base>..HEAD` recent-commits summary as BASE_BRANCH. */
   baseBranch: string;
-  /** Linear API context — apiKey is NOT forwarded into the sandbox. */
-  linearCtx: LinearContext;
+  /** Linear-facing service. The runner uses it for content fetches, mid-run
+   * sub-issue rebuilds, and label/state writes. The repo prefix and Linear
+   * credentials are encapsulated inside the service. */
+  linear: LinearService;
   // Host repo root — absolute path. The runner uses this to resolve the
   // prompt file path and to anchor sandbox/worktree state.
   repoRoot: string;
@@ -194,34 +187,6 @@ export interface RunIssueQueueOptions {
   // Env map intended for the docker sandbox. Caller is responsible for
   // stripping LINEAR_API_KEY before passing this in.
   sandboxEnv: Record<string, string>;
-  // Working repo's GitHub name (from gh-identity). Threaded into every
-  // mid-run `fetchSubIssues` call as the `[<repoName>] ` title-prefix
-  // scope filter (ADR-0012) — wrong-repo and unprefixed Sub-issues are
-  // invisible to the queue rebuild and never absorbed.
-  repoName: string;
-  /** Test seam — defaults to `linear.fetchIssueContent`. */
-  fetchIssueContent?: (
-    ctx: LinearContext,
-    issueId: string
-  ) => Promise<LinearIssueContent>;
-  /** Test seam — defaults to `linear.transitionToInProgress`. */
-  transitionToInProgress?: (
-    ctx: LinearContext,
-    issueId: string
-  ) => Promise<void>;
-  /** Test seam — defaults to `linear.transitionToDone`. */
-  transitionToDone?: (ctx: LinearContext, issueId: string) => Promise<void>;
-  /** Test seam — defaults to `linear.flipLabelToReadyForHuman`. */
-  flipLabelToReadyForHuman?: (
-    ctx: LinearContext,
-    issueId: string
-  ) => Promise<void>;
-  /** Test seam — defaults to `linear.postComment`. */
-  postComment?: (
-    ctx: LinearContext,
-    issueId: string,
-    body: string
-  ) => Promise<void>;
   /** Test seam — when provided, no real sandbox is created. The function is
    * called for every working-agent iteration *and* every summarizer
    * invocation. Defaults to sandcastle's top-level `run`. */
@@ -234,15 +199,6 @@ export interface RunIssueQueueOptions {
    * `git push -u origin <branch>` on the host after every working-agent
    * iteration that produced commits. See ADR-0007. */
   shellRunner?: ShellRunner;
-  /** Test seam — defaults to `linear.fetchSubIssues`. Called at every
-   * iteration boundary on PRD roots to absorb mid-run additions. See
-   * ADR-0010. Standalone roots never call this. The `repoName` argument
-   * applies the repo-prefix scope filter from ADR-0012. */
-  fetchSubIssues?: (
-    ctx: LinearContext,
-    prdId: string,
-    repoName: string
-  ) => Promise<SubIssue[]>;
 }
 
 export interface RunIssueQueueResult {
@@ -470,10 +426,10 @@ type RebuildOutcome =
  * cause (a typo'd or unprefixed title under a `[<repoName>] ` PRD), so an
  * empty rebuild is never silently confusing (ADR-0012).
  */
-function emptySubIssueRebuildMessage(repoName: string): string {
+function emptySubIssueRebuildMessage(): string {
   return (
-    `Queue rebuild returned no sub-issues for repo "${repoName}". ` +
-    `Tide filters Linear titles by the \`[${repoName}] \` prefix. ` +
+    `Queue rebuild returned no sub-issues for the working repo. ` +
+    `Tide filters Linear titles by the repo's bracketed prefix. ` +
     `Either retitle existing Linear issues to start with that prefix, ` +
     `or create one with the triage / to-prd / to-issues skill.`
   );
@@ -500,29 +456,19 @@ function emptySubIssueRebuildMessage(repoName: string): string {
  * - empty `ready-for-agent` set → empty queue (loop ends).
  */
 async function rebuildQueueAtBoundary(args: {
-  linearCtx: LinearContext;
+  linear: LinearService;
   prdId: string;
-  repoName: string;
-  fetchSubIssues: (
-    ctx: LinearContext,
-    prdId: string,
-    repoName: string
-  ) => Promise<SubIssue[]>;
   knownIdentifiers: Set<string>;
 }): Promise<RebuildOutcome> {
   let subIssues: SubIssue[];
   try {
-    subIssues = await args.fetchSubIssues(
-      args.linearCtx,
-      args.prdId,
-      args.repoName
-    );
+    subIssues = await args.linear.fetchSubIssues(args.prdId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { kind: "fetch-failed", reason: msg };
   }
   if (subIssues.length === 0) {
-    log.warn(emptySubIssueRebuildMessage(args.repoName));
+    log.warn(emptySubIssueRebuildMessage());
   }
 
   // Don't pre-filter `handled` identifiers from the candidate set:
@@ -615,23 +561,12 @@ export async function runIssueQueue(
     orderedIssues,
     branch,
     baseBranch,
-    linearCtx,
+    linear,
     repoRoot,
     featureWorktreePath,
     config,
     sandboxEnv,
-    repoName,
   } = options;
-  const fetchIssueContentFn =
-    options.fetchIssueContent ?? defaultFetchIssueContent;
-  const fetchSubIssuesFn = options.fetchSubIssues ?? defaultFetchSubIssues;
-  const transitionToInProgressFn =
-    options.transitionToInProgress ?? defaultTransitionToInProgress;
-  const transitionToDoneFn =
-    options.transitionToDone ?? defaultTransitionToDone;
-  const flipLabelFn =
-    options.flipLabelToReadyForHuman ?? defaultFlipLabelToReadyForHuman;
-  const postCommentFn = options.postComment ?? defaultPostComment;
   const readFinalAssistantMessage =
     options.readFinalAssistantMessage ?? defaultReadFinalAssistantMessage;
   const sandcastleRun = options.sandcastleRun ?? defaultSandcastleRun;
@@ -640,9 +575,7 @@ export async function runIssueQueue(
   // PRD root: fetch the parent body once for PRD_CONTENT — it's stable
   // across the loop. Standalone root: no parent to fetch.
   const parentContent: LinearIssueContent | undefined =
-    root.kind === "prd"
-      ? await fetchIssueContentFn(linearCtx, root.id)
-      : undefined;
+    root.kind === "prd" ? await linear.fetchIssueContent(root.id) : undefined;
 
   // The prompt template lives in the host repo at .tide/. The PRD-rooted
   // template is the long-standing `prompt.md`; the Standalone-Issue
@@ -679,7 +612,7 @@ export async function runIssueQueue(
 
     let issueContent: LinearIssueContent;
     try {
-      issueContent = await fetchIssueContentFn(linearCtx, ordered.id);
+      issueContent = await linear.fetchIssueContent(ordered.id);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`Failed to fetch ${ordered.identifier} content: ${msg}`);
@@ -698,7 +631,7 @@ export async function runIssueQueue(
     // A failure here is an infra failure: the queue aborts without further
     // Linear writes (matches the "infra FAIL → no label flip" rule).
     try {
-      await transitionToInProgressFn(linearCtx, ordered.id);
+      await linear.transitionToInProgress(ordered.id);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(
@@ -845,7 +778,7 @@ export async function runIssueQueue(
       // Step 2: flip the label first (the queue-gating signal), then post
       // the comment. A failure on either is an infra failure and aborts.
       try {
-        await flipLabelFn(linearCtx, ordered.id);
+        await linear.flipLabelToReadyForHuman(ordered.id);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(
@@ -862,7 +795,7 @@ export async function runIssueQueue(
         };
       }
       try {
-        await postCommentFn(linearCtx, ordered.id, commentBody);
+        await linear.postComment(ordered.id, commentBody);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(`Failed to post comment on ${ordered.identifier}: ${msg}`);
@@ -894,7 +827,7 @@ export async function runIssueQueue(
       // before review.
       if (root.kind === "prd") {
         try {
-          await transitionToDoneFn(linearCtx, ordered.id);
+          await linear.transitionToDone(ordered.id);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(
@@ -927,10 +860,8 @@ export async function runIssueQueue(
     // boundary. See ADR-0010.
     if (root.kind === "prd") {
       const outcome = await rebuildQueueAtBoundary({
-        linearCtx,
+        linear,
         prdId: root.id,
-        repoName,
-        fetchSubIssues: fetchSubIssuesFn,
         knownIdentifiers,
       });
       if (outcome.kind === "queue") {

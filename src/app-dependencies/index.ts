@@ -5,14 +5,15 @@
  * — and threaded explicitly through `runCli(argv, deps)`. Per-phase
  * migrations replace each placeholder with a real service interface.
  *
- * Phase 0 (this slice) introduces only the bundle's shape. The three
- * fields are typed `unknown` to make accidental dereferencing a type
- * error and to signal that no production code may touch them yet.
- * Phases 1-3 replace each `unknown` with a service interface
- * (`LinearService`, `SandcastleService`, `GhService`).
+ * Phase 1 (this slice) wires `linear: LinearService`. Phases 2-3 replace
+ * each remaining `unknown` with a service interface (`SandcastleService`,
+ * `GhService`).
  */
+
+import type { LinearService } from "../services/linear/index.ts";
+
 export interface AppDependencies {
-  linear: unknown;
+  linear: LinearService;
   gh: unknown;
   sandcastle: unknown;
 }

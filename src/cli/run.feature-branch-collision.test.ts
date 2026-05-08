@@ -23,9 +23,48 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PRD, SubIssue } from "../linear/index.ts";
+import { InMemoryLinearService } from "../services/linear/index.ts";
 import type { RootRef } from "../selector/index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
-import { runQueueAfterPick, type PrTailStepResult } from "./run.ts";
+import {
+  runQueueAfterPick,
+  type PrTailStepResult,
+  type RunQueueAfterPickOptions,
+} from "./run.ts";
+
+interface LinearContext {
+  apiKey: string;
+  teamKey: string;
+}
+
+interface LegacyOpts extends Omit<RunQueueAfterPickOptions, "linear"> {
+  linearCtx?: LinearContext;
+  fetchSubIssues?: (
+    ctx: LinearContext,
+    issueId: string,
+    repoName: string
+  ) => Promise<SubIssue[]>;
+  transitionRootToInProgress?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+}
+
+function legacyRunQueueAfterPick(opts: LegacyOpts): Promise<number> {
+  const { linearCtx, fetchSubIssues, transitionRootToInProgress, ...rest } =
+    opts;
+  const ctx = linearCtx ?? { apiKey: "lk", teamKey: "ENG" };
+  const linear = new InMemoryLinearService();
+  Object.defineProperty(linear, "fetchSubIssues", {
+    value: (id: string) =>
+      fetchSubIssues?.(ctx, id, rest.ghRepo.repo) ?? Promise.resolve([]),
+  });
+  Object.defineProperty(linear, "transitionToInProgress", {
+    value: (id: string) =>
+      transitionRootToInProgress?.(ctx, id) ?? Promise.resolve(),
+  });
+  return runQueueAfterPick({ ...rest, linear });
+}
 
 function git(repo: string, args: readonly string[]): void {
   execFileSync("git", args as string[], { cwd: repo, stdio: "ignore" });
@@ -111,7 +150,7 @@ describe("runQueueAfterPick — feature branch checked out at main repo", () => 
     const picked = makePRD({ branchName: "feature/foo" });
     let releasePromptCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       // Silent override path: currentBranch === picked.branchName, so
@@ -172,7 +211,7 @@ describe("runQueueAfterPick — feature branch checked out at main repo", () => 
     // featureBranch = currentBranch = "feature/foo", same collision.
     const picked = makePRD({ branchName: "user/some/other-branch" });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "feature/foo",

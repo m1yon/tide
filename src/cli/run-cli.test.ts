@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { AppDependencies } from "../app-dependencies/index.ts";
+import { InMemoryLinearService } from "../services/linear/index.ts";
 import { runCli } from "./run-cli.ts";
 
 type WriteFn = typeof process.stdout.write;
 
 const placeholderDeps: AppDependencies = {
-  linear: undefined,
+  linear: new InMemoryLinearService(),
   gh: undefined,
   sandcastle: undefined,
 };

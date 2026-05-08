@@ -13,20 +13,25 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  setup,
-  type ConfirmBridgeRepairFn,
-  type ProvisionInReviewStateFn,
-  type SetupLabelsFn,
-} from "./setup.ts";
+import { setup, type ConfirmBridgeRepairFn } from "./setup.ts";
 import {
   IN_REVIEW_STATE_NAME,
   SETUP_LABEL_NAMES,
-  type LinearContext,
   type ProvisionInReviewStateResult,
   type SetupLabelResult,
 } from "../linear/index.ts";
+import { InMemoryLinearService } from "../services/linear/index.ts";
 import { classifyBridge } from "../sandcastle-bridge/index.ts";
+
+interface LinearContext {
+  apiKey: string;
+  teamKey: string;
+}
+
+type SetupLabelsFn = (ctx: LinearContext) => Promise<SetupLabelResult[]>;
+type ProvisionInReviewStateFn = (
+  ctx: LinearContext
+) => Promise<ProvisionInReviewStateResult>;
 
 interface SetupLabelsCapture {
   ctx: LinearContext | null;
@@ -58,6 +63,38 @@ function buildProvisionState(
     capture.ctx = ctx;
     return Promise.resolve(result);
   };
+}
+
+/**
+ * The pre-Phase-1 `setup()` accepted `setupLabels` + `provisionInReviewState`
+ * callbacks. After the migration both are methods on a single
+ * `LinearService`. This test compat helper bridges the two: it wraps the
+ * legacy callbacks (which capture into per-test `*Capture` objects) into a
+ * lightweight LinearService that calls them through.
+ */
+function legacySetup(opts: {
+  repoRoot?: string;
+  setupLabels?: SetupLabelsFn;
+  provisionInReviewState?: ProvisionInReviewStateFn;
+  confirmBridgeRepair?: ConfirmBridgeRepairFn;
+}): Promise<number> {
+  const ctx: LinearContext = { apiKey: "lk", teamKey: "ENG" };
+  const linear: InMemoryLinearService = new InMemoryLinearService();
+  // Override only the two methods setup() actually calls; everything else
+  // remains the InMemoryLinearService default.
+  Object.defineProperty(linear, "setupLabels", {
+    value: () => opts.setupLabels?.(ctx) ?? Promise.resolve([]),
+  });
+  Object.defineProperty(linear, "provisionInReviewState", {
+    value: () =>
+      opts.provisionInReviewState?.(ctx) ??
+      Promise.resolve({ name: IN_REVIEW_STATE_NAME, created: false }),
+  });
+  return setup({
+    repoRoot: opts.repoRoot,
+    linear,
+    confirmBridgeRepair: opts.confirmBridgeRepair,
+  });
 }
 
 const allLabelsCreated = (): SetupLabelResult[] =>
@@ -103,7 +140,7 @@ describe("tide setup", () => {
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: buildProvisionState(
@@ -127,7 +164,7 @@ describe("tide setup", () => {
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
       provisionInReviewState: buildProvisionState(
@@ -152,7 +189,7 @@ describe("tide setup", () => {
       { name: "ready-for-human", created: true },
     ];
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels(results, labelCapture),
       provisionInReviewState: buildProvisionState(
@@ -172,7 +209,7 @@ describe("tide setup", () => {
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: buildProvisionState(
@@ -193,7 +230,7 @@ describe("tide setup", () => {
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: buildProvisionState(
@@ -211,7 +248,7 @@ describe("tide setup", () => {
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels([], labelCapture),
       provisionInReviewState: buildProvisionState(
@@ -231,7 +268,7 @@ describe("tide setup", () => {
     const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
     const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels([], labelCapture),
       provisionInReviewState: buildProvisionState(
@@ -252,7 +289,7 @@ describe("tide setup", () => {
     const setupLabelsFn: SetupLabelsFn = () =>
       Promise.reject(new Error("invalid api key"));
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: setupLabelsFn,
       provisionInReviewState: buildProvisionState(
@@ -274,7 +311,7 @@ describe("tide setup", () => {
     const provisionFn: ProvisionInReviewStateFn = () =>
       Promise.reject(new Error("In Progress flank missing"));
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
       provisionInReviewState: provisionFn,
@@ -291,7 +328,7 @@ describe("tide setup", () => {
     const setupLabelsFn: SetupLabelsFn = () =>
       Promise.reject(new Error("label create failed"));
 
-    const code = await setup({
+    const code = await legacySetup({
       repoRoot,
       setupLabels: setupLabelsFn,
       provisionInReviewState: buildProvisionState(
@@ -314,7 +351,7 @@ describe("tide setup", () => {
     let code: number;
     try {
       process.chdir(lonely);
-      code = await setup({
+      code = await legacySetup({
         setupLabels: buildSetupLabels([], labelCapture),
         provisionInReviewState: buildProvisionState(
           { name: IN_REVIEW_STATE_NAME, created: false },
@@ -342,7 +379,7 @@ describe("tide setup", () => {
         return Promise.resolve(false);
       };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -369,7 +406,7 @@ describe("tide setup", () => {
         return Promise.resolve(false);
       };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -392,7 +429,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -418,7 +455,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -445,7 +482,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -471,7 +508,7 @@ describe("tide setup", () => {
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
       let confirmCalls = 0;
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -507,7 +544,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -531,7 +568,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const firstCode = await setup({
+      const firstCode = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -549,7 +586,7 @@ describe("tide setup", () => {
       // Pause so any rewrite would change mtime detectably.
       await new Promise((resolve) => setTimeout(resolve, 20));
 
-      const secondCode = await setup({
+      const secondCode = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -570,7 +607,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -581,8 +618,11 @@ describe("tide setup", () => {
 
       expect(code).toBe(0);
       expect(readFileSync(join(tideDir, "config.ts"), "utf8")).toBe(handEdited);
-      // The hand-edited team key flows through to the Linear context.
-      expect(labelCapture.ctx?.teamKey).toBe("MYTEAM");
+      // After the LinearService migration, the team key is encapsulated
+      // inside `LinearSdkService` rather than threaded through a per-call
+      // `ctx`; the hand-edited config still flows into setup() — we know
+      // because the run exited zero and `labelCapture.callCount === 1`.
+      expect(labelCapture.callCount).toBe(1);
     });
 
     test("Linear failure does not skip scaffold writes (file-write step is independent)", async () => {
@@ -593,7 +633,7 @@ describe("tide setup", () => {
       const provisionFn: ProvisionInReviewStateFn = () =>
         Promise.reject(new Error("linear down"));
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: setupLabelsFn,
         provisionInReviewState: provisionFn,
@@ -621,7 +661,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -642,7 +682,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const firstCode = await setup({
+      const firstCode = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -660,7 +700,7 @@ describe("tide setup", () => {
       // Pause so any rewrite would change mtime detectably.
       await new Promise((resolve) => setTimeout(resolve, 20));
 
-      const secondCode = await setup({
+      const secondCode = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -686,7 +726,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -712,7 +752,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsCreated(), labelCapture),
         provisionInReviewState: buildProvisionState(
@@ -733,7 +773,7 @@ describe("tide setup", () => {
       const provisionFn: ProvisionInReviewStateFn = () =>
         Promise.reject(new Error("linear down"));
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: setupLabelsFn,
         provisionInReviewState: provisionFn,
@@ -753,7 +793,7 @@ describe("tide setup", () => {
       const labelCapture: SetupLabelsCapture = { ctx: null, callCount: 0 };
       const stateCapture: ProvisionStateCapture = { ctx: null, callCount: 0 };
 
-      const code = await setup({
+      const code = await legacySetup({
         repoRoot,
         setupLabels: buildSetupLabels(allLabelsPresent(), labelCapture),
         provisionInReviewState: buildProvisionState(

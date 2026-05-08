@@ -28,8 +28,18 @@ jobs:
       - name: Lint
         run: bun run lint
 
-      - name: Test
-        run: bun test
+      - name: Test (short)
+        run: bun run test
+
+      - name: Test (long, includes live Linear contract)
+        env:
+          # Live-arm contract test for `LinearSdkService` reads these. When
+          # absent, the contract suite returns `undefined` from its factory
+          # and skips the live arm cleanly — so this job is safe to run
+          # without the secrets configured.
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_KEY: ${{ secrets.LINEAR_TEAM_KEY }}
+        run: bun run ftest
 
   nix-build:
     name: Nix build

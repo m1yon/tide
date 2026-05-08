@@ -17,16 +17,22 @@ import {
   runQueueAfterPick,
   tideRun,
   type PrTailStepResult,
+  type RunOptions,
   type RunPrTailStepOptions,
+  type RunQueueAfterPickOptions,
 } from "./run.ts";
 import type { BuildOptions } from "./build.ts";
 import type { GhIdentity } from "../gh-identity/index.ts";
 import type {
-  LinearContext,
+  LinearIssueContent,
   PRD,
+  ProvisionInReviewStateResult,
+  SetupLabelResult,
   StandaloneIssue,
   SubIssue,
 } from "../linear/index.ts";
+import { SETUP_LABEL_NAMES } from "../linear/index.ts";
+import type { LinearService } from "../services/linear/index.ts";
 import type {
   PrSubmissionResult,
   ShellResult,
@@ -34,6 +40,174 @@ import type {
 } from "../pr-submission/index.ts";
 import type { RootRef } from "../selector/index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
+
+/**
+ * Legacy-shape `LinearContext` that the pre-Phase-1 tests passed through
+ * `linearCtx`. After the migration these fields live as `private readonly`
+ * fields inside `LinearSdkService`; the test compat layer below threads
+ * them into the user's old-style stub functions so we don't have to
+ * rewrite every call-site.
+ */
+interface LinearContext {
+  apiKey: string;
+  teamKey: string;
+}
+
+/**
+ * Build a thin per-test `LinearService` from the old-style per-function
+ * stub callbacks the legacy tests passed via `linearCtx` + per-method
+ * fields. Methods that aren't stubbed default to the obvious no-op:
+ * empty lists, resolved transitions, etc. Used only by the compat layer
+ * (`legacyRunQueueAfterPick` / `legacyTideRun`) below.
+ */
+function makeLegacyLinear(stubs: {
+  ctx?: LinearContext;
+  repoName?: string;
+  listPRDs?: (ctx: LinearContext, repoName: string) => Promise<PRD[]>;
+  listStandaloneIssues?: (
+    ctx: LinearContext,
+    repoName: string
+  ) => Promise<StandaloneIssue[]>;
+  assertInReviewStatePresent?: (ctx: LinearContext) => Promise<void>;
+  fetchSubIssues?: (
+    ctx: LinearContext,
+    issueId: string,
+    repoName: string
+  ) => Promise<SubIssue[]>;
+  fetchIssueContent?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<LinearIssueContent>;
+  transitionToInProgress?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+  transitionToDone?: (ctx: LinearContext, issueId: string) => Promise<void>;
+  transitionToInReview?: (ctx: LinearContext, issueId: string) => Promise<void>;
+  flipLabelToReadyForHuman?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+  postComment?: (
+    ctx: LinearContext,
+    issueId: string,
+    body: string
+  ) => Promise<void>;
+  setupLabels?: (ctx: LinearContext) => Promise<SetupLabelResult[]>;
+  provisionInReviewState?: (
+    ctx: LinearContext
+  ) => Promise<ProvisionInReviewStateResult>;
+  viewer?: () => Promise<void>;
+}): LinearService {
+  const ctx = stubs.ctx ?? { apiKey: "lk", teamKey: "ENG" };
+  const repoName = stubs.repoName ?? "tide";
+  return {
+    viewer: () => stubs.viewer?.() ?? Promise.resolve(),
+    listPRDs: () => stubs.listPRDs?.(ctx, repoName) ?? Promise.resolve([]),
+    listStandaloneIssues: () =>
+      stubs.listStandaloneIssues?.(ctx, repoName) ?? Promise.resolve([]),
+    setupLabels: () =>
+      stubs.setupLabels?.(ctx) ??
+      Promise.resolve(
+        SETUP_LABEL_NAMES.map((name) => ({ name, created: false }))
+      ),
+    provisionInReviewState: () =>
+      stubs.provisionInReviewState?.(ctx) ??
+      Promise.resolve({ name: "In Review" as const, created: false }),
+    assertInReviewStatePresent: () =>
+      stubs.assertInReviewStatePresent?.(ctx) ?? Promise.resolve(),
+    fetchSubIssues: (issueId) =>
+      stubs.fetchSubIssues?.(ctx, issueId, repoName) ?? Promise.resolve([]),
+    fetchIssueContent: (issueId) =>
+      stubs.fetchIssueContent?.(ctx, issueId) ??
+      Promise.resolve({
+        identifier: issueId,
+        title: issueId,
+        body: "",
+        comments: [],
+      }),
+    transitionToInProgress: (issueId) =>
+      stubs.transitionToInProgress?.(ctx, issueId) ?? Promise.resolve(),
+    transitionToDone: (issueId) =>
+      stubs.transitionToDone?.(ctx, issueId) ?? Promise.resolve(),
+    transitionToInReview: (issueId) =>
+      stubs.transitionToInReview?.(ctx, issueId) ?? Promise.resolve(),
+    flipLabelToReadyForHuman: (issueId) =>
+      stubs.flipLabelToReadyForHuman?.(ctx, issueId) ?? Promise.resolve(),
+    postComment: (issueId, body) =>
+      stubs.postComment?.(ctx, issueId, body) ?? Promise.resolve(),
+  };
+}
+
+/** Legacy-shape options for `runQueueAfterPick` — pre-Phase-1, before the
+ * Linear `?` seams collapsed into one `linear: LinearService`. */
+interface LegacyRunQueueAfterPickOptions extends Omit<
+  RunQueueAfterPickOptions,
+  "linear"
+> {
+  linearCtx?: LinearContext;
+  fetchSubIssues?: (
+    ctx: LinearContext,
+    issueId: string,
+    repoName: string
+  ) => Promise<SubIssue[]>;
+  transitionRootToInProgress?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+  transitionRootToInReview?: (
+    ctx: LinearContext,
+    issueId: string
+  ) => Promise<void>;
+}
+
+/** Compat shim: legacy tests pass per-function Linear stubs + `linearCtx`;
+ * production now takes a single `linear: LinearService`. This helper
+ * funnels the legacy stubs into a synthetic LinearService. */
+function legacyRunQueueAfterPick(
+  opts: LegacyRunQueueAfterPickOptions
+): Promise<number> {
+  const {
+    linearCtx,
+    fetchSubIssues,
+    transitionRootToInProgress,
+    transitionRootToInReview,
+    ...rest
+  } = opts;
+  const linear = makeLegacyLinear({
+    ctx: linearCtx,
+    repoName: rest.ghRepo.repo,
+    fetchSubIssues,
+    transitionToInProgress: transitionRootToInProgress,
+    transitionToInReview: transitionRootToInReview,
+  });
+  return runQueueAfterPick({ ...rest, linear });
+}
+
+/** Legacy-shape options for `tideRun` (the early-gate tests use this).  */
+interface LegacyRunOptions extends Omit<RunOptions, "linear"> {
+  listPRDs?: (ctx: LinearContext, repoName: string) => Promise<PRD[]>;
+  listStandaloneIssues?: (
+    ctx: LinearContext,
+    repoName: string
+  ) => Promise<StandaloneIssue[]>;
+  assertInReviewStatePresent?: (ctx: LinearContext) => Promise<void>;
+}
+
+function legacyTideRun(opts: LegacyRunOptions = {}): Promise<number> {
+  const {
+    listPRDs,
+    listStandaloneIssues,
+    assertInReviewStatePresent,
+    ...rest
+  } = opts;
+  const linear = makeLegacyLinear({
+    listPRDs,
+    listStandaloneIssues,
+    assertInReviewStatePresent,
+  });
+  return tideRun({ ...rest, linear });
+}
 
 /**
  * Stub the `sandcastle.createWorktree(...)` test seam used by
@@ -327,7 +501,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -355,7 +529,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-    await tideRun({
+    await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -381,7 +555,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const buildStub: BuildStub = { exitCode: 2, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -406,7 +580,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
     const pickStub: PickRootStub = { pickIndex: 0, calls: 0 };
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -431,7 +605,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
     const standaloneRepoNames: string[] = [];
 
-    await tideRun({
+    await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -474,7 +648,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
       const buildStub: BuildStub = { exitCode: 0, calls: [] };
       const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-      await tideRun({
+      await legacyTideRun({
         repoRoot,
         stdout: captureStdout,
         stderr: captureStderr,
@@ -514,7 +688,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const pickStub: PickRootStub = { pickIndex: 1, calls: 0 };
     const queueCalls: RootRef[] = [];
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -554,7 +728,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const pickStub: PickRootStub = { standalonePickIndex: 0, calls: 0 };
     const queueCalls: RootRef[] = [];
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -590,7 +764,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-    await tideRun({
+    await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -616,7 +790,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     // We can't observe the sandbox env directly here (the queue path is out
     // of scope for this slice). The narrower assertion: tideRun does not
     // error out on the LINEAR_API_KEY being absent from sandboxEnv.
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -638,7 +812,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-    await tideRun({
+    await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -663,7 +837,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-    await tideRun({
+    await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -693,7 +867,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const buildStub: BuildStub = { exitCode: 0, calls: [] };
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -722,7 +896,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const listPRDs = (): Promise<PRD[]> =>
       Promise.reject(new Error("Linear API key invalid"));
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -747,7 +921,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     let ghIdentityCalls = 0;
     let ghTokenCalls = 0;
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -790,7 +964,7 @@ describe("tide run — early gates and Linear PRD selector", () => {
     const listStub: ListPRDsStub = { prds: [], calls: [], repoNames: [] };
     const calls: { apiKey: string; teamKey: string }[] = [];
 
-    await tideRun({
+    await legacyTideRun({
       repoRoot,
       stdout: captureStdout,
       stderr: captureStderr,
@@ -828,7 +1002,7 @@ describe("tideRun current-branch capture", () => {
 
   test("detached HEAD fails fast before any queue work runs", async () => {
     const sinks = makeSinks();
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: sinks.pushStdout,
       stderr: sinks.pushStderr,
@@ -847,7 +1021,7 @@ describe("tideRun current-branch capture", () => {
 
   test("git rev-parse failure also fails fast with a clear error", async () => {
     const sinks = makeSinks();
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: sinks.pushStdout,
       stderr: sinks.pushStderr,
@@ -878,7 +1052,7 @@ describe("tideRun current-branch capture", () => {
     );
     writeFileSync(join(repoRoot, ".tide", "Dockerfile"), "FROM scratch\n");
 
-    const code = await tideRun({
+    const code = await legacyTideRun({
       repoRoot,
       stdout: sinks.pushStdout,
       stderr: sinks.pushStderr,
@@ -1307,7 +1481,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     let fetchSubIssuesCalls = 0;
     let promptCalls = 0;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       // currentBranch matches the PRD's branchName — under today's rules
@@ -1365,7 +1539,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     let promptCalls = 0;
     let capturedFeatureBranch: string | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/feature/eng-7",
@@ -1411,7 +1585,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     let capturedFeatureBranch: string | undefined;
     const createCalls: CreateWorktreeOptions[] = [];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "main",
@@ -1485,7 +1659,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     let capturedFeatureBranch: string | undefined;
     const createCalls: CreateWorktreeOptions[] = [];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -1549,7 +1723,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
     let runIssueQueueCalls = 0;
     let transitionCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "main",
@@ -1604,7 +1778,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
 
     const fetchCalls: { issueId: string; repoName: string }[] = [];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -1646,7 +1820,7 @@ describe("runQueueAfterPick — pre-flight gate removal + Branch override", () =
 
     const fetchCalls: { issueId: string; repoName: string }[] = [];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -1714,7 +1888,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
     let capturedBaseBranch: string | undefined;
     const createCalls: CreateWorktreeOptions[] = [];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -1775,7 +1949,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
     let promptedWith: PromptPrTargetInput | undefined;
     let capturedBaseBranch: string | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -1826,7 +2000,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
     let promptedWith: PromptPrTargetInput | undefined;
     let capturedBaseBranch: string | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -1875,7 +2049,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
     let runIssueQueueCalls = 0;
     let transitionCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -1923,7 +2097,7 @@ describe("runQueueAfterPick — PR target branch (ADR-0016)", () => {
 
     let capturedTailBaseBranch: string | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -1988,7 +2162,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     const events: string[] = [];
     const transitionCalls: { ctx: LinearContext; issueId: string }[] = [];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -2048,7 +2222,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     let transitionCalls = 0;
     let runIssueQueueCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -2087,7 +2261,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
     const picked = makePRD({ id: "uuid-eng-7", identifier: "ENG-7" });
     let runIssueQueueCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -2131,7 +2305,7 @@ describe("runQueueAfterPick — PRD In Progress transition", () => {
 
     let capturedBaseBranch: string | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "main",
@@ -2198,7 +2372,7 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
     let capturedFeaturePath: string | undefined;
     let capturedTailFeaturePath: string | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "main",
@@ -2264,7 +2438,7 @@ describe("runQueueAfterPick — Feature worktree creation", () => {
     });
     let runIssueQueueCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "main",
@@ -2338,7 +2512,7 @@ describe("runQueueAfterPick — feature-branch release pre-flight", () => {
     let gitSwitchCalls = 0;
     let createCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-other",
@@ -2406,7 +2580,7 @@ describe("runQueueAfterPick — feature-branch release pre-flight", () => {
     let runIssueQueueCalls = 0;
     let transitionCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/feature/eng-7",
@@ -2461,7 +2635,7 @@ describe("runQueueAfterPick — feature-branch release pre-flight", () => {
     let runIssueQueueCalls = 0;
     let transitionCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/feature/eng-7",
@@ -2520,7 +2694,7 @@ describe("runQueueAfterPick — feature-branch release pre-flight", () => {
     let capturedSwitchTarget: string | undefined;
     let capturedSwitchRepoRoot: string | undefined;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -2621,7 +2795,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
       }),
     ];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -2667,7 +2841,7 @@ describe("runQueueAfterPick — ready-for-human preflight skip log", () => {
       }),
     ];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -2750,7 +2924,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
   test("logs the no-merge warning when PR creation was opted out", async () => {
     const picked = makePRD({ identifier: "ENG-7" });
 
-    const code = await runQueueAfterPick(
+    const code = await legacyRunQueueAfterPick(
       makeBaseOpts(picked, () =>
         Promise.resolve({
           outcome: { kind: "opted-out" },
@@ -2770,7 +2944,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
   test("logs the no-merge warning when the rev-list gate skipped an empty branch", async () => {
     const picked = makePRD({ identifier: "ENG-7" });
 
-    const code = await runQueueAfterPick(
+    const code = await legacyRunQueueAfterPick(
       makeBaseOpts(picked, () =>
         Promise.resolve({
           outcome: { kind: "skipped-empty" },
@@ -2788,7 +2962,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
   test("logs the no-merge warning in addition to the existing PR-failure error", async () => {
     const picked = makePRD({ identifier: "ENG-7" });
 
-    const code = await runQueueAfterPick(
+    const code = await legacyRunQueueAfterPick(
       makeBaseOpts(picked, () =>
         Promise.resolve({
           outcome: { kind: "failed", message: "push refused by remote" },
@@ -2810,7 +2984,7 @@ describe("runQueueAfterPick — end-of-run no-merge warning", () => {
   test("does not log the no-merge warning when a PR was opened", async () => {
     const picked = makePRD({ identifier: "ENG-7" });
 
-    const code = await runQueueAfterPick(
+    const code = await legacyRunQueueAfterPick(
       makeBaseOpts(picked, () =>
         Promise.resolve({
           outcome: {
@@ -2880,7 +3054,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       branchName: "user/feature/eng-7",
     });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -2923,7 +3097,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       branchName: "user/feature/eng-7",
     });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "main",
@@ -2956,7 +3130,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       branchName: "user/feature/eng-7",
     });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/feature/eng-7",
@@ -2998,7 +3172,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       branchName: "user/feature/eng-7",
     });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -3038,7 +3212,7 @@ describe("runQueueAfterPick — override-induced no-Done warning", () => {
       branchName: "user/eng-7",
     });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "user/wip-experiment",
@@ -3101,7 +3275,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     });
     const transitionCalls: { ctx: LinearContext; issueId: string }[] = [];
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3144,7 +3318,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
       [];
     let capturedRoot: { kind: string } | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3183,7 +3357,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     let runIssueQueueCalls = 0;
     let transitionCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3243,7 +3417,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     let runIssueQueueCalls = 0;
     let transitionCalls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3297,7 +3471,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
   test("logs the BLOCKED warning when the standalone iteration ends on a flip (no completion)", async () => {
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3338,7 +3512,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
   test("does not log the BLOCKED warning when the standalone iteration completes (DONE)", async () => {
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3371,7 +3545,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
   test("PRD-rooted run with a flipped sub-issue does not log the Standalone BLOCKED warning", async () => {
     const picked = makePRD({ identifier: "ENG-1", title: "Example PRD" });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3417,7 +3591,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
   test("pre-flight summary text branches per root kind: 'Standalone Issue: 1 iteration'", async () => {
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3452,7 +3626,7 @@ describe("runQueueAfterPick — Standalone Issue root", () => {
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
     let capturedSubIssues: { number: number; title: string }[] | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3494,7 +3668,7 @@ describe("runQueueAfterPick — PR-tail subIssueRefs come from runner.processed 
     const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
     let capturedSubIssues: { number: number; title: string }[] | undefined;
 
-    await runQueueAfterPick({
+    await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3595,7 +3769,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
     const calls: { ctx: LinearContext; issueId: string }[] = [];
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3629,7 +3803,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
     let calls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3663,7 +3837,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
     let calls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3698,7 +3872,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
     const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
     let calls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3731,7 +3905,7 @@ describe("runQueueAfterPick — post-submission In Review hook", () => {
   test("In Review transition failure preserves the PR and earlier Linear writes; warning surfaces in summary", async () => {
     const picked = makePRD({ id: "uuid-eng-1", identifier: "ENG-1" });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: prdRoot(picked),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3813,7 +3987,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     });
     const calls: { ctx: LinearContext; issueId: string }[] = [];
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3847,7 +4021,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
     let calls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3881,7 +4055,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
     let calls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3917,7 +4091,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
     let calls = 0;
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",
@@ -3951,7 +4125,7 @@ describe("runQueueAfterPick — post-submission In Review hook (Standalone Issue
   test("In Review transition failure preserves the PR and earlier Linear writes; warning surfaces in summary", async () => {
     const issue = makeStandaloneIssue({ identifier: "ENG-7" });
 
-    const code = await runQueueAfterPick({
+    const code = await legacyRunQueueAfterPick({
       picked: standaloneRoot(issue),
       ghRepo: { owner: "acme", repo: "widget" },
       currentBranch: "master",

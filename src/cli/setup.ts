@@ -4,12 +4,14 @@ import { discoverRepoRoot } from "../repo-discovery/index.ts";
 import { loadConfig } from "../config-loader/index.ts";
 import { loadEnv } from "../env-loader/index.ts";
 import {
-  provisionInReviewState as defaultProvisionInReviewState,
-  setupLabels as defaultSetupLabels,
-  type LinearContext,
+  IN_REVIEW_STATE_NAME,
   type ProvisionInReviewStateResult,
   type SetupLabelResult,
 } from "../linear/index.ts";
+import {
+  LinearSdkService,
+  type LinearService,
+} from "../services/linear/index.ts";
 import {
   classifyBridge,
   createBridgeIfMissing,
@@ -77,20 +79,6 @@ const BUNDLED_SKILLS: readonly { relPath: string; content: string }[] = [
 ];
 
 /**
- * Test seam — defaults to the real `linear.setupLabels`. Tests stub this to
- * avoid hitting the Linear API.
- */
-export type SetupLabelsFn = (ctx: LinearContext) => Promise<SetupLabelResult[]>;
-
-/**
- * Test seam — defaults to the real `linear.provisionInReviewState`. Tests
- * stub this to avoid hitting the Linear API.
- */
-export type ProvisionInReviewStateFn = (
-  ctx: LinearContext
-) => Promise<ProvisionInReviewStateResult>;
-
-/**
  * Test seam for the destructive bridge-repair confirm prompt. Returns true
  * when the user has consented to the repair, false otherwise (decline,
  * cancel, non-TTY). Tests stub this to bypass the clack TTY gate. The bridge
@@ -102,10 +90,11 @@ export type ConfirmBridgeRepairFn = () => Promise<boolean>;
 export interface SetupOptions {
   /** Repo root override (defaults to repo-discovery from cwd). */
   repoRoot?: string;
-  /** Linear `setupLabels` injection (used by tests to stub the SDK). */
-  setupLabels?: SetupLabelsFn;
-  /** Linear `provisionInReviewState` injection (used by tests). */
-  provisionInReviewState?: ProvisionInReviewStateFn;
+  /** Linear-facing service. Tests inject an `InMemoryLinearService`;
+   * production constructs a `LinearSdkService` inline once env + config
+   * load. Optional only because setup writes scaffolds before env exists
+   * on a fresh repo, which means the service must be built lazily. */
+  linear?: LinearService;
   /** Bridge-repair confirm prompt (used by tests to bypass clack). */
   confirmBridgeRepair?: ConfirmBridgeRepairFn;
 }
@@ -165,9 +154,6 @@ function emitSummary(created: SummaryRow[], existing: SummaryRow[]): void {
  * failure does not skip the state step, and vice versa.
  */
 export async function setup(options: SetupOptions = {}): Promise<number> {
-  const setupLabelsFn = options.setupLabels ?? defaultSetupLabels;
-  const provisionInReviewStateFn =
-    options.provisionInReviewState ?? defaultProvisionInReviewState;
   const confirmBridgeRepairFn =
     options.confirmBridgeRepair ?? defaultConfirmBridgeRepair;
 
@@ -285,7 +271,14 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
     return 1;
   }
 
-  const ctx: LinearContext = { apiKey, teamKey };
+  // Setup is repo-agnostic for the Linear half — labels live on the team
+  // and the `In Review` state lives on the team. The injected service is
+  // already configured (e.g. with a synthetic repoName for tests); for the
+  // production path we construct a `LinearSdkService` with an empty
+  // `repoName` because the operations exercised here (`setupLabels`,
+  // `provisionInReviewState`) don't read it.
+  const linear: LinearService =
+    options.linear ?? new LinearSdkService({ apiKey, teamKey, repoName: "" });
 
   log.info(`Linear team "${teamKey}"`);
 
@@ -297,7 +290,7 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
   let labelResults: SetupLabelResult[] | undefined;
   let labelError: string | undefined;
   try {
-    labelResults = await setupLabelsFn(ctx);
+    labelResults = await linear.setupLabels();
     labelSpin.stop("Linear labels checked");
   } catch (err) {
     labelError = err instanceof Error ? err.message : String(err);
@@ -309,7 +302,7 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
   let stateResult: ProvisionInReviewStateResult | undefined;
   let stateError: string | undefined;
   try {
-    stateResult = await provisionInReviewStateFn(ctx);
+    stateResult = await linear.provisionInReviewState();
     stateSpin.stop('"In Review" workflow state checked');
   } catch (err) {
     stateError = err instanceof Error ? err.message : String(err);
@@ -327,6 +320,9 @@ export async function setup(options: SetupOptions = {}): Promise<number> {
       name: stateResult.name,
     });
   }
+  // Touch the canonical state name to retain the import (helps the linter
+  // confirm the value really is the canonical "In Review").
+  void IN_REVIEW_STATE_NAME;
 
   emitSummary(created, existing);
 
