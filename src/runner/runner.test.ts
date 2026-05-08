@@ -11,12 +11,43 @@ import {
   DONE_SIGNAL,
   runIssueQueue,
   type OrderedIssue,
+  type RunIssueQueueOptions,
+  type RunIssueQueueResult,
   type ShellResult,
   type ShellRunner,
 } from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { LinearIssueContent, SubIssue } from "../linear/index.ts";
 import { InMemoryLinearService } from "../services/linear/index.ts";
+import { InMemorySandcastleService } from "../services/sandcastle/index.ts";
+
+/**
+ * Legacy-shape options for `runIssueQueue` — pre-Phase-2, before the
+ * sandcastle `?` seams collapsed into one `sandcastle: SandcastleService`.
+ * Test cases keep their existing `sandcastleRun` / `readFinalAssistantMessage`
+ * stubs; this thin shim funnels them into an `InMemorySandcastleService`
+ * whose per-call handlers replay the supplied callbacks. The shim is a
+ * test-file-only helper — production callers thread a real or fake
+ * SandcastleService directly.
+ */
+interface LegacyRunIssueQueueOptions extends Omit<
+  RunIssueQueueOptions,
+  "sandcastle"
+> {
+  sandcastleRun?: (opts: RunOptions) => Promise<RunResult>;
+  readFinalAssistantMessage?: (logFilePath: string) => Promise<string>;
+}
+
+function legacyRunIssueQueue(
+  opts: LegacyRunIssueQueueOptions
+): Promise<RunIssueQueueResult> {
+  const { sandcastleRun, readFinalAssistantMessage, ...rest } = opts;
+  const sandcastle = new InMemorySandcastleService();
+  if (sandcastleRun) sandcastle.setRunHandler(sandcastleRun);
+  if (readFinalAssistantMessage)
+    sandcastle.setReadTranscriptHandler(readFinalAssistantMessage);
+  return runIssueQueue({ ...rest, sandcastle });
+}
 
 /**
  * Map a runner's `OrderedIssue[]` into the `SubIssue[]` shape that
@@ -113,7 +144,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push(`done:${String(args[0])}`);
     };
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -159,7 +190,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const sandboxRunNames: string[] = [];
     let runCount = 0;
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
@@ -254,7 +285,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     let summarizerPromptSeen: string | undefined;
     let runCount = 0;
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
@@ -327,7 +358,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     let capturedSignal: string | string[] | undefined;
     const linear = new InMemoryLinearService();
 
-    await runIssueQueue({
+    await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -350,7 +381,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
   test("DONE signalled but no commits → routed through agent-FAIL flip path (continue, not abort)", async () => {
     const linear = new InMemoryLinearService();
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -378,7 +409,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
   test("commits without a DONE signal → routed through agent-FAIL flip path (continue, not abort)", async () => {
     const linear = new InMemoryLinearService();
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -409,7 +440,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const linear = new InMemoryLinearService();
     let runCount = 0;
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -444,7 +475,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
     const linear = new InMemoryLinearService();
     let runCount = 0;
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -494,7 +525,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
       new Error("Linear write rate-limited")
     );
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [
@@ -536,7 +567,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
   test("infra FAIL (sandcastle threw) aborts without flipping any state", async () => {
     const linear = new InMemoryLinearService();
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -567,7 +598,7 @@ describe("runIssueQueue — DONE signal + Linear transitions", () => {
         events.push(`done:${String(args[0])}`);
     };
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -604,7 +635,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
       },
     });
 
-    await runIssueQueue({
+    await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "user/feature/eng-7",
       baseBranch: "main",
@@ -635,7 +666,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     let capturedOpts: RunOptions | undefined;
     const linear = new InMemoryLinearService();
 
-    await runIssueQueue({
+    await legacyRunIssueQueue({
       ...baseRunOptions,
       featureWorktreePath: "/repo/.tide/worktrees/feature-eng-1",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -658,7 +689,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     const linear = new InMemoryLinearService();
     let runCount = 0;
 
-    await runIssueQueue({
+    await legacyRunIssueQueue({
       ...baseRunOptions,
       featureWorktreePath: "/repo/.tide/worktrees/feature-eng-1",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -697,7 +728,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     let capturedOpts: RunOptions | undefined;
     const linear = new InMemoryLinearService();
 
-    await runIssueQueue({
+    await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -720,7 +751,7 @@ describe("runIssueQueue — prompt args + sandcastle wiring", () => {
     const linear = new InMemoryLinearService();
     let runCount = 0;
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -755,7 +786,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     const { runner, calls } = recordingShellRunner();
     const linear = new InMemoryLinearService();
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -775,7 +806,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     const { runner, calls } = recordingShellRunner();
     const linear = new InMemoryLinearService();
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -810,7 +841,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
     const { runner, calls } = recordingShellRunner();
     const linear = new InMemoryLinearService();
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
       orderedIssues: [makeOrdered()],
@@ -842,7 +873,7 @@ describe("runIssueQueue — host-side `git push` after every iteration", () => {
       },
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -868,7 +899,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
   test("standalone DONE + commits → does NOT call transitionToDone; counts as completed", async () => {
     const linear = new InMemoryLinearService();
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng-7",
       root: { kind: "standalone" },
@@ -887,7 +918,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
     const linear = new InMemoryLinearService();
     let runCount = 0;
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng-7",
       root: { kind: "standalone" },
@@ -926,7 +957,7 @@ describe("runIssueQueue — Standalone Issue root: skip Done transition", () => 
   test("PRD root: sub-issue DONE + commits → still calls transitionToDone (regression guard)", async () => {
     const linear = new InMemoryLinearService();
 
-    await runIssueQueue({
+    await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -950,7 +981,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       },
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -988,7 +1019,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       return Promise.resolve([]);
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -1036,7 +1067,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       return Promise.resolve([]);
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -1087,7 +1118,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
     });
 
     let runCount = 0;
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -1161,7 +1192,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       return Promise.resolve([]);
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -1191,7 +1222,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       return Promise.resolve([]);
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -1235,7 +1266,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       return Promise.resolve([]);
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },
@@ -1260,7 +1291,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
       return Promise.resolve([]);
     });
 
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng-7",
       root: { kind: "standalone" },
@@ -1291,7 +1322,7 @@ describe("runIssueQueue — mid-run queue rebuild (ADR-0010)", () => {
     });
 
     let runCount = 0;
-    const result = await runIssueQueue({
+    const result = await legacyRunIssueQueue({
       ...baseRunOptions,
       branch: "feature/eng",
       root: { kind: "prd", id: "uuid-prd", identifier: "ENG-100" },

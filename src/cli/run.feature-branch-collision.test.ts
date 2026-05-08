@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PRD, SubIssue } from "../linear/index.ts";
 import { InMemoryLinearService } from "../services/linear/index.ts";
+import { SandcastleSdkService } from "../services/sandcastle/index.ts";
 import type { RootRef } from "../selector/index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
 import {
@@ -37,7 +38,10 @@ interface LinearContext {
   teamKey: string;
 }
 
-interface LegacyOpts extends Omit<RunQueueAfterPickOptions, "linear"> {
+interface LegacyOpts extends Omit<
+  RunQueueAfterPickOptions,
+  "linear" | "sandcastle"
+> {
   linearCtx?: LinearContext;
   fetchSubIssues?: (
     ctx: LinearContext,
@@ -63,7 +67,10 @@ function legacyRunQueueAfterPick(opts: LegacyOpts): Promise<number> {
     value: (id: string) =>
       transitionRootToInProgress?.(ctx, id) ?? Promise.resolve(),
   });
-  return runQueueAfterPick({ ...rest, linear });
+  // The whole point of this test is the real `createWorktree` against a
+  // real git repo + bridge — use the SDK-backed SandcastleService.
+  const sandcastle = new SandcastleSdkService();
+  return runQueueAfterPick({ ...rest, linear, sandcastle });
 }
 
 function git(repo: string, args: readonly string[]): void {

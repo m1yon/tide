@@ -51,20 +51,15 @@
 
 import { spawn } from "node:child_process";
 import path from "node:path";
-import {
-  run as defaultSandcastleRun,
-  claudeCode,
-  type RunOptions,
-  type RunResult,
-} from "@ai-hero/sandcastle";
+import { claudeCode, type RunResult } from "@ai-hero/sandcastle";
 import { defaultImageName, docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { log } from "@clack/prompts";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { LinearIssueContent, SubIssue } from "../linear/index.ts";
 import type { LinearService } from "../services/linear/index.ts";
+import type { SandcastleService } from "../services/sandcastle/index.ts";
 import { buildPromptArgs } from "../prompt-args/index.ts";
 import { buildOrderedQueue } from "../queue-build/index.ts";
-import { readFinalAssistantMessage as defaultReadFinalAssistantMessage } from "../transcript-extract/index.ts";
 import {
   renderSummarizerPrompt,
   type SummarizerPromptKind,
@@ -102,15 +97,6 @@ export interface OrderedIssue {
 export type RunRoot =
   | { kind: "prd"; id: string; identifier: string }
   | { kind: "standalone" };
-
-/**
- * Test seam type: a function with the same shape as the top-level
- * `sandcastle.run(...)`. Tests pass a stub; production wires sandcastle's
- * real `run`. Each call creates an Iteration worktree + container, runs
- * the agent, merges the iteration's commits into the Feature worktree's
- * branch on sandbox close, and tears everything down.
- */
-export type SandcastleRunFn = (opts: RunOptions) => Promise<RunResult>;
 
 export interface ShellResult {
   exitCode: number;
@@ -168,6 +154,11 @@ export interface RunIssueQueueOptions {
    * sub-issue rebuilds, and label/state writes. The repo prefix and Linear
    * credentials are encapsulated inside the service. */
   linear: LinearService;
+  /** Sandcastle-facing service. The runner uses it for the working-agent
+   * iteration, the summarizer iteration, and reading the working-agent's
+   * transcript back from the log file when a BLOCKED / agent-FAIL outcome
+   * fires. The third-party sandcastle module is encapsulated inside. */
+  sandcastle: SandcastleService;
   // Host repo root — absolute path. The runner uses this to resolve the
   // prompt file path and to anchor sandbox/worktree state.
   repoRoot: string;
@@ -187,14 +178,6 @@ export interface RunIssueQueueOptions {
   // Env map intended for the docker sandbox. Caller is responsible for
   // stripping LINEAR_API_KEY before passing this in.
   sandboxEnv: Record<string, string>;
-  /** Test seam — when provided, no real sandbox is created. The function is
-   * called for every working-agent iteration *and* every summarizer
-   * invocation. Defaults to sandcastle's top-level `run`. */
-  sandcastleRun?: SandcastleRunFn;
-  /** Test seam — defaults to `transcript-extract.readFinalAssistantMessage`.
-   * Reads a sandcastle log file from disk and returns the agent's final
-   * assistant-message text. */
-  readFinalAssistantMessage?: (logFilePath: string) => Promise<string>;
   /** Test seam — defaults to a `node:child_process` spawn. Used to fire
    * `git push -u origin <branch>` on the host after every working-agent
    * iteration that produced commits. See ADR-0007. */
@@ -312,8 +295,7 @@ async function runSummarizer(args: {
   parentContent: LinearIssueContent | undefined;
   parentIdentifier: string | undefined;
   issueContent: LinearIssueContent;
-  sandcastleRun: SandcastleRunFn;
-  readFinalAssistantMessage: (logFilePath: string) => Promise<string>;
+  sandcastle: SandcastleService;
   summarizerLogPath: string;
   featureWorktreePath: string;
   repoRoot: string;
@@ -323,7 +305,7 @@ async function runSummarizer(args: {
   if (args.workingAgentLogFilePath === undefined) {
     throw new Error("working agent did not produce a log file");
   }
-  const transcript = await args.readFinalAssistantMessage(
+  const transcript = await args.sandcastle.readFinalAssistantMessage(
     args.workingAgentLogFilePath
   );
 
@@ -337,7 +319,7 @@ async function runSummarizer(args: {
     transcript,
   });
 
-  const summarizerResult = await args.sandcastleRun({
+  const summarizerResult = await args.sandcastle.run({
     name: "tide-summarizer",
     agent: claudeCode("claude-opus-4-7"),
     sandbox: docker({
@@ -358,7 +340,8 @@ async function runSummarizer(args: {
   });
 
   const logFilePath = summarizerResult.logFilePath ?? args.summarizerLogPath;
-  const commentBody = await args.readFinalAssistantMessage(logFilePath);
+  const commentBody =
+    await args.sandcastle.readFinalAssistantMessage(logFilePath);
   if (commentBody.trim() === "") {
     throw new Error("summarizer produced an empty final message");
   }
@@ -562,14 +545,12 @@ export async function runIssueQueue(
     branch,
     baseBranch,
     linear,
+    sandcastle,
     repoRoot,
     featureWorktreePath,
     config,
     sandboxEnv,
   } = options;
-  const readFinalAssistantMessage =
-    options.readFinalAssistantMessage ?? defaultReadFinalAssistantMessage;
-  const sandcastleRun = options.sandcastleRun ?? defaultSandcastleRun;
   const shellRunner = options.shellRunner ?? defaultShellRunner;
 
   // PRD root: fetch the parent body once for PRD_CONTENT — it's stable
@@ -667,7 +648,7 @@ export async function runIssueQueue(
 
     let result: RunResult;
     try {
-      result = await sandcastleRun({
+      result = await sandcastle.run({
         name: "tide",
         agent: claudeCode("claude-opus-4-7"),
         // Each iteration runs in an ephemeral Iteration worktree
@@ -759,8 +740,7 @@ export async function runIssueQueue(
           parentContent,
           parentIdentifier: root.kind === "prd" ? root.identifier : undefined,
           issueContent,
-          sandcastleRun,
-          readFinalAssistantMessage,
+          sandcastle,
           summarizerLogPath,
           featureWorktreePath,
           repoRoot,

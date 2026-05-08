@@ -19,16 +19,13 @@
 // existing PR) is out of scope for this slice.
 
 import { spawn } from "node:child_process";
-import {
-  run as defaultSandcastleRun,
-  claudeCode,
-  type RunOptions,
-} from "@ai-hero/sandcastle";
+import { claudeCode, type RunOptions } from "@ai-hero/sandcastle";
 import { defaultImageName, docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { GhRepo } from "../github/index.ts";
 import { repoTitlePrefix } from "../linear/index.ts";
-import { DONE_SIGNAL, type SandcastleRunFn } from "../runner/index.ts";
+import { DONE_SIGNAL } from "../runner/index.ts";
+import type { SandcastleService } from "../services/sandcastle/index.ts";
 
 export interface ShellResult {
   exitCode: number;
@@ -78,13 +75,13 @@ export interface RunPrSubmissionOptions {
   // Env map intended for the docker sandbox. Caller is responsible for
   // stripping LINEAR_API_KEY (matches the queue runner's contract).
   sandboxEnv: Record<string, string>;
+  /** Sandcastle-facing service. The PR-submission iteration is a single
+   * `sandcastle.run({ branchStrategy: 'head', cwd: featureWorktreePath, ... })`
+   * call that runs directly inside the Feature worktree (no per-call worktree,
+   * no merge step). */
+  sandcastle: SandcastleService;
   // Test seams.
   shellRunner?: ShellRunner;
-  /** Test seam — defaults to sandcastle's top-level `run`. The PR-submission
-   * iteration is a single `sandcastle.run({ branchStrategy: 'head', cwd:
-   * featureWorktreePath, ... })` call that runs directly inside the Feature
-   * worktree (no per-call worktree, no merge step). */
-  sandcastleRun?: SandcastleRunFn;
 }
 
 export interface PrSubmissionResult {
@@ -469,9 +466,9 @@ export async function runPrSubmission(
     featureWorktreePath,
     config,
     sandboxEnv,
+    sandcastle,
     shellRunner = defaultShellRunner,
   } = options;
-  const sandcastleRun = options.sandcastleRun ?? defaultSandcastleRun;
 
   // Step 1: fire the sandcastle iteration with the bundled, interface-
   // emphasizing prompt. Inline `prompt` (not `promptFile`) — the template
@@ -499,7 +496,7 @@ export async function runPrSubmission(
     // result. Registering DONE_SIGNAL is informational: maxIterations=1
     // already caps the loop, but matching the runner's exit vocabulary
     // keeps the agent's prompt instructions consistent.
-    await sandcastleRun({
+    await sandcastle.run({
       name: "tide-pr",
       agent: claudeCode("claude-opus-4-7"),
       sandbox: docker({

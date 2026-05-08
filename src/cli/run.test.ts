@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CreateWorktreeOptions, Worktree } from "@ai-hero/sandcastle";
+import { InMemorySandcastleService } from "../services/sandcastle/index.ts";
 import type {
   BranchOverrideOutcome,
   PromptBranchOverrideInput,
@@ -139,11 +140,13 @@ function makeLegacyLinear(stubs: {
   };
 }
 
-/** Legacy-shape options for `runQueueAfterPick` — pre-Phase-1, before the
- * Linear `?` seams collapsed into one `linear: LinearService`. */
+/** Legacy-shape options for `runQueueAfterPick` — pre-Phase-2, before the
+ * Linear `?` seams collapsed into one `linear: LinearService` and before
+ * the sandcastle `createWorktree?` seam collapsed into the threaded
+ * `sandcastle: SandcastleService`. */
 interface LegacyRunQueueAfterPickOptions extends Omit<
   RunQueueAfterPickOptions,
-  "linear"
+  "linear" | "sandcastle"
 > {
   linearCtx?: LinearContext;
   fetchSubIssues?: (
@@ -159,11 +162,17 @@ interface LegacyRunQueueAfterPickOptions extends Omit<
     ctx: LinearContext,
     issueId: string
   ) => Promise<void>;
+  /** Legacy-shape sandcastle createWorktree seam. The shim funnels this
+   * into an `InMemorySandcastleService` whose per-call createWorktree
+   * handler replays the supplied callback. */
+  createWorktree?: (opts: CreateWorktreeOptions) => Promise<Worktree>;
 }
 
-/** Compat shim: legacy tests pass per-function Linear stubs + `linearCtx`;
- * production now takes a single `linear: LinearService`. This helper
- * funnels the legacy stubs into a synthetic LinearService. */
+/** Compat shim: legacy tests pass per-function Linear stubs + `linearCtx`
+ * + `createWorktree`; production now takes a single `linear: LinearService`
+ * + a single `sandcastle: SandcastleService`. This helper funnels the
+ * legacy stubs into a synthetic LinearService and an
+ * InMemorySandcastleService. */
 function legacyRunQueueAfterPick(
   opts: LegacyRunQueueAfterPickOptions
 ): Promise<number> {
@@ -172,6 +181,7 @@ function legacyRunQueueAfterPick(
     fetchSubIssues,
     transitionRootToInProgress,
     transitionRootToInReview,
+    createWorktree,
     ...rest
   } = opts;
   const linear = makeLegacyLinear({
@@ -181,11 +191,13 @@ function legacyRunQueueAfterPick(
     transitionToInProgress: transitionRootToInProgress,
     transitionToInReview: transitionRootToInReview,
   });
-  return runQueueAfterPick({ ...rest, linear });
+  const sandcastle = new InMemorySandcastleService();
+  if (createWorktree) sandcastle.setCreateWorktreeHandler(createWorktree);
+  return runQueueAfterPick({ ...rest, linear, sandcastle });
 }
 
 /** Legacy-shape options for `tideRun` (the early-gate tests use this).  */
-interface LegacyRunOptions extends Omit<RunOptions, "linear"> {
+interface LegacyRunOptions extends Omit<RunOptions, "linear" | "sandcastle"> {
   listPRDs?: (ctx: LinearContext, repoName: string) => Promise<PRD[]>;
   listStandaloneIssues?: (
     ctx: LinearContext,
@@ -206,7 +218,8 @@ function legacyTideRun(opts: LegacyRunOptions = {}): Promise<number> {
     listStandaloneIssues,
     assertInReviewStatePresent,
   });
-  return tideRun({ ...rest, linear });
+  const sandcastle = new InMemorySandcastleService();
+  return tideRun({ ...rest, linear, sandcastle });
 }
 
 /**
@@ -1097,6 +1110,7 @@ describe("runPrTailStep", () => {
     featureWorktreePath: "/repo/.tide/worktrees/feature-per-32",
     config: baseConfig,
     sandboxEnv: {},
+    sandcastle: new InMemorySandcastleService(),
     completedCount: 3,
     // Default to non-zero so tests that don't care about the rev-list gate
     // exercise the runPrSubmission path.

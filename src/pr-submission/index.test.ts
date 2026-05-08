@@ -11,7 +11,28 @@ import {
 } from "./index.ts";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { RunOptions, RunResult } from "@ai-hero/sandcastle";
-import type { SandcastleRunFn } from "../runner/index.ts";
+import { InMemorySandcastleService } from "../services/sandcastle/index.ts";
+
+/**
+ * Build an `InMemorySandcastleService` whose `run()` handler replays the
+ * supplied callback. Mirrors the legacy `sandcastleRun` test seam in
+ * shape so each `runPrSubmission` test stays one-line.
+ */
+function fakeSandcastle(
+  runHandler?: (opts: RunOptions) => Promise<RunResult>
+): InMemorySandcastleService {
+  const svc = new InMemorySandcastleService();
+  if (runHandler) svc.setRunHandler(runHandler);
+  return svc;
+}
+
+const baseRunHandler: (opts: RunOptions) => Promise<RunResult> = () =>
+  Promise.resolve({
+    iterations: [],
+    stdout: "",
+    commits: [],
+    branch: "feature/per-32",
+  } satisfies RunResult);
 
 interface ShellCall {
   cmd: string;
@@ -59,14 +80,6 @@ const baseConfig: TideConfig = {
 };
 
 const baseGhRepo = { owner: "acme", repo: "widget" };
-
-const baseSandcastleRun: SandcastleRunFn = () =>
-  Promise.resolve({
-    iterations: [],
-    stdout: "",
-    commits: [],
-    branch: "feature/per-32",
-  } satisfies RunResult);
 
 describe("resolveCurrentBranch", () => {
   it("returns the trimmed branch name on success", async () => {
@@ -227,16 +240,6 @@ describe("runPrSubmission", () => {
     ]);
 
     let receivedRunOptions: RunOptions | undefined;
-    const sandcastleRun: SandcastleRunFn = (opts) => {
-      receivedRunOptions = opts;
-      return Promise.resolve({
-        iterations: [],
-        stdout: "",
-        commits: [],
-        branch: "feature/per-32",
-      } satisfies RunResult);
-    };
-
     const result = await runPrSubmission({
       ghRepo: baseGhRepo,
       branch: "feature/per-32",
@@ -253,7 +256,15 @@ describe("runPrSubmission", () => {
       config: baseConfig,
       sandboxEnv: {},
       shellRunner: runner,
-      sandcastleRun,
+      sandcastle: fakeSandcastle((opts) => {
+        receivedRunOptions = opts;
+        return Promise.resolve({
+          iterations: [],
+          stdout: "",
+          commits: [],
+          branch: "feature/per-32",
+        } satisfies RunResult);
+      }),
     });
 
     expect(result).toEqual({
@@ -356,7 +367,7 @@ describe("runPrSubmission", () => {
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandcastleRun: baseSandcastleRun,
+        sandcastle: fakeSandcastle(baseRunHandler),
       })
     );
     expect(err).toBeInstanceOf(Error);
@@ -365,9 +376,6 @@ describe("runPrSubmission", () => {
 
   it("wraps sandcastle thrown errors with a tide-prefixed message", async () => {
     const { runner } = buildShellRunner([]);
-
-    const sandcastleRun: SandcastleRunFn = () =>
-      Promise.reject(new Error("sandbox failed to start"));
 
     const err = await captureError(
       runPrSubmission({
@@ -383,7 +391,9 @@ describe("runPrSubmission", () => {
         config: baseConfig,
         sandboxEnv: {},
         shellRunner: runner,
-        sandcastleRun,
+        sandcastle: fakeSandcastle(() =>
+          Promise.reject(new Error("sandbox failed to start"))
+        ),
       })
     );
     expect(err).toBeInstanceOf(Error);

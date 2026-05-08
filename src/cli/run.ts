@@ -30,11 +30,7 @@ import {
   cancel,
 } from "@clack/prompts";
 import { spawn } from "node:child_process";
-import {
-  createWorktree as defaultCreateWorktree,
-  type CreateWorktreeOptions,
-  type Worktree,
-} from "@ai-hero/sandcastle";
+import type { Worktree } from "@ai-hero/sandcastle";
 import {
   decideBranchOverride,
   promptBranchOverride as defaultPromptBranchOverride,
@@ -71,6 +67,10 @@ import {
   LinearSdkService,
   type LinearService,
 } from "../services/linear/index.ts";
+import {
+  SandcastleSdkService,
+  type SandcastleService,
+} from "../services/sandcastle/index.ts";
 import {
   countCommitsAhead as defaultCountCommitsAhead,
   resolveCurrentBranch,
@@ -136,6 +136,10 @@ export interface RunOptions {
    * `tideRun` builds it after every other piece of context is in place.
    */
   linear?: LinearService;
+  /** Sandcastle-facing service. Tests inject an `InMemorySandcastleService`;
+   * production constructs a `SandcastleSdkService` inline. The third-party
+   * sandcastle module is composed inside the SDK service. */
+  sandcastle?: SandcastleService;
   /** Root selector prompt. Tests stub this to bypass the clack UI. */
   pickRoot?: (input: {
     prds: readonly PRD[];
@@ -177,6 +181,9 @@ export interface RunQueueAfterPickOptions {
   originHead: string | undefined;
   /** Linear-facing service. Threaded through to the runner unchanged. */
   linear: LinearService;
+  /** Sandcastle-facing service. Used for the long-lived Feature worktree
+   * and threaded through to the runner + PR-submission step. */
+  sandcastle: SandcastleService;
   repoRoot: string;
   config: TideConfig;
   sandboxEnv: Record<string, string>;
@@ -188,15 +195,6 @@ export interface RunQueueAfterPickOptions {
   confirmRun?: (count: number, branch: string) => Promise<boolean>;
   /** Test seam — clack `confirm` for "Create a PR at the end?". */
   confirmPr?: () => Promise<boolean>;
-  /**
-   * Test seam — defaults to sandcastle's top-level `createWorktree`. Used
-   * to create the long-lived Feature worktree once per `tide run`, after
-   * the user's pre-flight confirms succeed and before `runIssueQueue`
-   * fires. Tide never closes the returned `Worktree` handle, so the
-   * worktree directory persists across runs (sandcastle's collision
-   * detection reuses an existing managed worktree on the next invocation).
-   */
-  createWorktree?: (opts: CreateWorktreeOptions) => Promise<Worktree>;
   /**
    * Test seam — defaults to the `branch-override` module's clack `select`
    * wrapper. Fires only when the user's current branch differs from the
@@ -260,6 +258,9 @@ export interface RunPrTailStepOptions {
   featureWorktreePath: string;
   config: TideConfig;
   sandboxEnv: Record<string, string>;
+  /** Sandcastle-facing service. Threaded into `runPrSubmission` for the
+   * PR-create iteration. */
+  sandcastle: SandcastleService;
   completedCount: number;
   /** Test seam — defaults to the imported `runPrSubmission`. */
   runPrSubmission?: (
@@ -351,6 +352,7 @@ export async function runPrTailStep(
       featureWorktreePath: opts.featureWorktreePath,
       config: opts.config,
       sandboxEnv: opts.sandboxEnv,
+      sandcastle: opts.sandcastle,
     });
     return {
       outcome: { kind: "opened", url: prResult.url },
@@ -470,11 +472,11 @@ export async function runQueueAfterPick(
   opts: RunQueueAfterPickOptions
 ): Promise<number> {
   const linear = opts.linear;
+  const sandcastle = opts.sandcastle;
   const runIssueQueueFn = opts.runIssueQueue ?? defaultRunIssueQueue;
   const runPrTailStepFn = opts.runPrTailStep ?? runPrTailStep;
   const confirmRunFn = opts.confirmRun ?? defaultConfirmRun;
   const confirmPrFn = opts.confirmPr ?? defaultConfirmPr;
-  const createWorktreeFn = opts.createWorktree ?? defaultCreateWorktree;
   const promptBranchOverrideFn =
     opts.promptBranchOverride ?? defaultPromptBranchOverride;
   const promptPrTargetFn = opts.promptPrTarget ?? defaultPromptPrTarget;
@@ -701,7 +703,7 @@ export async function runQueueAfterPick(
   // ephemeral worktree beneath this one (see runner module).
   let featureWorktree: Worktree;
   try {
-    featureWorktree = await createWorktreeFn({
+    featureWorktree = await sandcastle.createWorktree({
       branchStrategy: {
         type: "branch",
         branch: featureBranch,
@@ -725,6 +727,7 @@ export async function runQueueAfterPick(
     branch: featureBranch,
     baseBranch,
     linear,
+    sandcastle,
     repoRoot: opts.repoRoot,
     featureWorktreePath: featureWorktree.worktreePath,
     config: opts.config,
@@ -771,6 +774,7 @@ export async function runQueueAfterPick(
     featureWorktreePath: featureWorktree.worktreePath,
     config: opts.config,
     sandboxEnv: opts.sandboxEnv,
+    sandcastle,
     completedCount: queueResult.completed,
   });
 
@@ -950,6 +954,13 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     });
   }
 
+  // Construct the SandcastleService. Tests inject
+  // `options.sandcastle` (typically `InMemorySandcastleService`); production
+  // constructs a `SandcastleSdkService` that composes sandcastle's
+  // top-level `run`, `createWorktree`, and the transcript-extract reader.
+  const sandcastle: SandcastleService =
+    options.sandcastle ?? new SandcastleSdkService();
+
   // Preflight: refuse to start when the team has no "In Review" workflow
   // state. Without this gate a clean run would only discover the missing
   // state at the post-submission hand-off, after the queue has already done
@@ -1070,6 +1081,7 @@ export async function tideRun(options: RunOptions = {}): Promise<number> {
     currentBranch,
     originHead,
     linear,
+    sandcastle,
     repoRoot,
     config,
     sandboxEnv,
