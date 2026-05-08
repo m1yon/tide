@@ -1,99 +1,24 @@
 #!/usr/bin/env bun
 
-import { build } from "./build.ts";
-import { doctor } from "./doctor.ts";
-import { tideRun } from "./run.ts";
-import { setup } from "./setup.ts";
+import type { AppDependencies } from "../app-dependencies/index.ts";
+import { runCli } from "./run-cli.ts";
 
-// VERSION is replaced at compile time via `bun build --compile --define`.
-// When running uncompiled (`bun run src/cli/index.ts`), the substitution does
-// not occur and we fall back to "dev".
-declare const VERSION: string | undefined;
-const version: string = typeof VERSION === "string" ? VERSION : "dev";
-
-const HELP_TEXT = `tide — global CLI for Sandcastle-driven, Linear-rooted PRD runs
-
-Usage:
-  tide <command> [options]
-
-Commands:
-  run      Run the PRD-rooted, Linear-tracked agent flow for the current repo
-  setup    Provision the sandcastle bridge, .tide/ scaffold, and Linear labels + workflow state
-  doctor   Check that the local environment is ready to run tide
-  build    Force-rebuild the docker image used by tide run
-
-Options:
-  --version    Print the tide version
-  --help, -h   Print this help message
-
-Run \`tide <command> --help\` for command-specific help (once subcommands ship).
-`;
-
-type Subcommand = "run" | "setup" | "doctor" | "build";
-
-const SUBCOMMANDS: readonly Subcommand[] = ["run", "setup", "doctor", "build"];
-
-function isSubcommand(value: string): value is Subcommand {
-  return (SUBCOMMANDS as readonly string[]).includes(value);
-}
-
-function printHelp(): void {
-  process.stdout.write(HELP_TEXT);
-}
-
-function printVersion(): void {
-  process.stdout.write(`${version}\n`);
-}
-
-export function run(argv: readonly string[]): number | Promise<number> {
-  const args = argv.slice(2);
-
-  if (args.length === 0) {
-    printHelp();
-    return 0;
-  }
-
-  const first = args[0];
-  if (first === undefined) {
-    printHelp();
-    return 0;
-  }
-
-  if (first === "--version" || first === "-v") {
-    printVersion();
-    return 0;
-  }
-
-  if (first === "--help" || first === "-h") {
-    printHelp();
-    return 0;
-  }
-
-  if (isSubcommand(first)) {
-    if (first === "setup") {
-      return setup();
-    }
-    if (first === "doctor") {
-      return doctor();
-    }
-    if (first === "build") {
-      return build();
-    }
-    return tideRun();
-  }
-
-  process.stderr.write(`tide: unknown command "${first}"\n\n`);
-  process.stderr.write(HELP_TEXT);
-  return 1;
-}
+/**
+ * Production `bin` shim. Reads `process.argv`, constructs the real
+ * `AppDependencies` (placeholder values until Phases 1-3 wire in
+ * `LinearService`, `GhService`, and `SandcastleService`), invokes
+ * `runCli`, and forwards the resolved exit code to `process.exit`.
+ * Anything more than env reads + dependency construction belongs in
+ * `runCli`, not here.
+ */
+const deps: AppDependencies = {
+  linear: undefined,
+  gh: undefined,
+  sandcastle: undefined,
+};
 
 if (import.meta.main) {
-  const result = run(process.argv);
-  if (typeof result === "number") {
-    process.exit(result);
-  } else {
-    void result.then((code) => {
-      process.exit(code);
-    });
-  }
+  void runCli(process.argv.slice(2), deps).then((code) => {
+    process.exit(code);
+  });
 }
