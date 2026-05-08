@@ -57,7 +57,7 @@ import {
   type RunOptions,
   type RunResult,
 } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { defaultImageName, docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { log } from "@clack/prompts";
 import type { TideConfig } from "../config-loader/index.ts";
 import {
@@ -360,6 +360,7 @@ async function runSummarizer(args: {
   readFinalAssistantMessage: (logFilePath: string) => Promise<string>;
   summarizerLogPath: string;
   featureWorktreePath: string;
+  repoRoot: string;
   sandboxEnv: Record<string, string>;
   config: TideConfig;
 }): Promise<string> {
@@ -384,6 +385,7 @@ async function runSummarizer(args: {
     name: "tide-summarizer",
     agent: claudeCode("claude-opus-4-7"),
     sandbox: docker({
+      imageName: defaultImageName(args.repoRoot),
       mounts: args.config.sandbox.mounts,
       env: args.sandboxEnv,
     }),
@@ -740,7 +742,12 @@ export async function runIssueQueue(
         // branch + worktree + container, runs the agent, merges the
         // iteration's commits into the Feature worktree's feature
         // branch on sandbox close, and tears everything down.
+        // `imageName` pinned to the repo-root tag produced by `tide build`.
+        // Sandcastle otherwise derives it from the iteration worktree's
+        // basename (a per-branch directory), which never matches the built
+        // tag and yields "Unable to find image" at run time.
         sandbox: docker({
+          imageName: defaultImageName(repoRoot),
           mounts: config.sandbox.mounts,
           env: sandboxEnv,
         }),
@@ -823,6 +830,7 @@ export async function runIssueQueue(
           readFinalAssistantMessage,
           summarizerLogPath,
           featureWorktreePath,
+          repoRoot,
           sandboxEnv,
           config,
         });

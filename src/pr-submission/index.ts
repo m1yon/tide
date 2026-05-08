@@ -24,7 +24,7 @@ import {
   claudeCode,
   type RunOptions,
 } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { defaultImageName, docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { TideConfig } from "../config-loader/index.ts";
 import type { GhRepo } from "../github/index.ts";
 import { repoTitlePrefix } from "../linear/index.ts";
@@ -503,6 +503,7 @@ export async function runPrSubmission(
       name: "tide-pr",
       agent: claudeCode("claude-opus-4-7"),
       sandbox: docker({
+        imageName: defaultImageName(repoRoot),
         mounts: config.sandbox.mounts,
         env: sandboxEnv,
       }),
