@@ -1,3 +1,62 @@
+diff --git a/node_modules/@ai-hero/sandcastle/.bun-tag-82398b947c9ecb79 b/.bun-tag-82398b947c9ecb79
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/SandboxFactory.js b/dist/SandboxFactory.js
+index 330d747b56dcffda1cd5b893f55bce4ee8886af1..5fc7498f5a5c36a02dcc08bac3c7405401a0c57b 100644
+--- a/dist/SandboxFactory.js
++++ b/dist/SandboxFactory.js
+@@ -8,7 +8,7 @@ import { Display } from "./Display.js";
+ import { runHostHooks } from "./SandboxLifecycle.js";
+ import { startSandbox } from "./startSandbox.js";
+ import { syncOut } from "./syncOut.js";
+-import { patchGitMountsForWindows } from "./mountUtils.js";
++import { patchGitMountsForWindows, patchWorktreeGitdirBackref } from "./mountUtils.js";
+ export class Sandbox extends Context.Tag("Sandbox")() {
+ }
+ const getCopyIn = (handle) => {
+@@ -195,13 +195,23 @@ export const WorktreeDockerSandboxFactory = {
+                         ? runHostHooks(hooks.host.onWorktreeReady, hostRepoDir, signal)
+                         : Effect.void).pipe(Effect.andThen(resolveGitMounts(gitPath)), Effect.provideService(FileSystem.FileSystem, fileSystem), Effect.mapError((e) => new WorktreeError({
+                         message: `Failed to resolve git mounts: ${e}`,
+-                    })), Effect.flatMap((gitMounts) => 
++                    })), Effect.flatMap((gitMounts) =>
+                     // Patch git mounts for Windows worktree compatibility (ADR-0006)
+                     Effect.tryPromise({
+                         try: () => patchGitMountsForWindows(gitMounts, hostRepoDir, SANDBOX_REPO_DIR),
+                         catch: (e) => new WorktreeError({
+                             message: `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+                         }),
++                    })), Effect.flatMap((gitMounts) =>
++                    // Overlay the worktree's gitdir back-reference when the
++                    // worktree's host path differs from the sandbox mount
++                    // point — required for nested worktrees on Linux as well
++                    // as for Windows worktrees.
++                    Effect.tryPromise({
++                        try: () => patchWorktreeGitdirBackref(gitMounts, hostRepoDir, SANDBOX_REPO_DIR),
++                        catch: (e) => new WorktreeError({
++                            message: `Failed to patch worktree gitdir back-ref: ${e instanceof Error ? e.message : String(e)}`,
++                        }),
+                     })), Effect.flatMap((gitMounts) => Effect.acquireUseRelease(startSandbox({
+                         provider: sandboxProvider,
+                         hostRepoDir,
+@@ -246,7 +256,16 @@ export const WorktreeDockerSandboxFactory = {
+                         catch: (e) => new WorktreeError({
+                             message: `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+                         }),
+-                    })), Effect.flatMap((gitMounts) => 
++                    })),
++                    // Overlay the worktree's gitdir back-reference when the
++                    // iteration worktree's host path differs from the sandbox
++                    // mount point (e.g. tide's two-layer worktree scheme).
++                    Effect.flatMap((gitMounts) => Effect.tryPromise({
++                        try: () => patchWorktreeGitdirBackref(gitMounts, worktreeInfo.path, SANDBOX_REPO_DIR),
++                        catch: (e) => new WorktreeError({
++                            message: `Failed to patch worktree gitdir back-ref: ${e instanceof Error ? e.message : String(e)}`,
++                        }),
++                    })), Effect.flatMap((gitMounts) =>
+                     // sandboxProvider is guaranteed bind-mount here
+                     // (isolated providers return early above)
+                     startSandbox({
 diff --git a/dist/WorktreeManager.js b/dist/WorktreeManager.js
 index 61fbc343cc1ab61cdaa73e208c78259a8a230e5e..2257d6b7d0fa06e6704d1aea81af971a8600ee6c 100644
 --- a/dist/WorktreeManager.js
@@ -20,3 +79,85 @@ index 61fbc343cc1ab61cdaa73e208c78259a8a230e5e..2257d6b7d0fa06e6704d1aea81af971a
              if (isManagedWorktree) {
                  const dirty = yield* hasUncommittedChanges(collision.path);
                  if (dirty) {
+diff --git a/dist/mountUtils.js b/dist/mountUtils.js
+index 849802602ac72cee5f06ebde88077aa55b233b78..6119e73ab0dc0ef113bb186351d3835c3b8edc26 100644
+--- a/dist/mountUtils.js
++++ b/dist/mountUtils.js
+@@ -242,4 +242,76 @@ export const patchGitMountsForWindows = async (gitMounts, worktreeHostPath, sand
+     }
+     return correctedMounts;
+ };
++/**
++ * Overlay the worktree's gitdir back-reference so it resolves inside the
++ * sandbox when the worktree's host path is bind-mounted at a different
++ * sandbox path.
++ *
++ * Background: git stores a worktree's host `.git` file path in
++ * `<parent-git>/worktrees/<name>/gitdir` for back-reference / integrity
++ * checks. When the worktree is bind-mounted at a sandbox path that
++ * differs from its host path (always true on Windows; true on Linux
++ * whenever the caller nests the worktree, e.g. tide's two-layer
++ * feature/iteration scheme), that host path doesn't exist inside the
++ * sandbox and `git status` / `git checkout` / `git worktree list` fail
++ * the integrity check. Overlay-mount a corrected `gitdir` file pointing
++ * at `<sandboxRepoDir>/.git` to fix it.
++ *
++ * No-op when the worktree's `.git` is a directory (regular repo, not a
++ * worktree pointer) or when the host and sandbox paths already match.
++ */
++export const patchWorktreeGitdirBackref = async (gitMounts, worktreeHostPath, sandboxRepoDir, readFile, statFile, platform = process.platform) => {
++    const isWindows = platform === "win32";
++    const normalizedWorktree = worktreeHostPath.replace(/\\/g, "/");
++    if (!isWindows && normalizedWorktree === sandboxRepoDir) {
++        return gitMounts;
++    }
++    const _readFile = readFile ??
++        (async (p) => {
++            const { readFile: rf } = await import("node:fs/promises");
++            return rf(p, "utf-8");
++        });
++    const _statFile = statFile ??
++        (async (p) => {
++            const { stat } = await import("node:fs/promises");
++            const s = await stat(p);
++            return s.isDirectory() ? "directory" : "file";
++        });
++    const gitEntryPath = join(worktreeHostPath, ".git");
++    let gitEntryType;
++    try {
++        gitEntryType = await _statFile(gitEntryPath);
++    }
++    catch {
++        return gitMounts;
++    }
++    if (gitEntryType === "directory")
++        return gitMounts;
++    let content;
++    try {
++        content = (await _readFile(gitEntryPath)).trim();
++    }
++    catch {
++        return gitMounts;
++    }
++    const match = content.match(/^gitdir:\s*(.+)$/);
++    if (!match)
++        return gitMounts;
++    const { parentGitDir, worktreeName } = parseGitdirPath(match[1]);
++    // patchGitMountsForWindows remaps the parent .git to PARENT_GIT_SANDBOX_DIR
++    // on Windows. On Linux it stays at the host path.
++    const parentGitSandboxPath = isWindows
++        ? PARENT_GIT_SANDBOX_DIR
++        : parentGitDir.replace(/\\/g, "/");
++    const tempDir = await mkdtemp(join(tmpdir(), "sandcastle-git-backref-"));
++    const tempBackRef = join(tempDir, "gitdir");
++    await writeFile(tempBackRef, `${sandboxRepoDir}/.git\n`);
++    return [
++        ...gitMounts,
++        {
++            hostPath: tempBackRef,
++            sandboxPath: `${parentGitSandboxPath}/worktrees/${worktreeName}/gitdir`,
++        },
++    ];
++};
+ //# sourceMappingURL=mountUtils.js.map
+\ No newline at end of file
